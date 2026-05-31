@@ -1,0 +1,82 @@
+# micropuffer API coverage
+
+This tracks micropuffer against the turbopuffer docs and OpenAPI surface.
+
+Sources checked:
+
+- https://turbopuffer.com/docs/query
+- https://turbopuffer.com/docs/write
+- https://turbopuffer.com/docs/fts
+- https://turbopuffer.com/docs/recall
+- https://turbopuffer.com/docs/warm-cache
+- https://turbopuffer.com/docs/pinning
+- https://github.com/turbopuffer/turbopuffer-openapi/blob/main/openapi.yml
+
+## Covered by live parity tests
+
+- `POST /v2/namespaces/:namespace`
+  - row upsert
+  - `patch_by_filter`
+  - `delete_by_filter`
+  - column upserts
+  - conditional upserts, patches, and deletes
+  - `return_affected_ids`
+  - `copy_from_namespace`
+- `POST /v2/namespaces/:namespace/query`
+  - `ANN`
+  - `kNN`
+  - `BM25`
+  - `SparseKNN`
+  - order by one attribute
+  - rank expressions using `Sum`, `Max`, `Product`, `Attribute`, filters-as-scores
+  - filters: equality, membership, array containment, numeric comparisons, array comparisons, glob, case-insensitive glob, regex, fuzzy, token filters, boolean combinators
+  - projections with `include_attributes`
+  - projections with `exclude_attributes`
+  - `vector_encoding: "base64"` output
+  - ungrouped count aggregation
+  - grouped count aggregation
+  - multi-query
+- `POST /v1/namespaces/:namespace/_debug/recall`, response-shape parity only
+- `POST /v2/namespaces/:namespace/explain_query`, local shape only; live returned `400` for the temp namespace/index state
+- `GET /v1/namespaces`
+- `GET /v1/namespaces/:namespace/metadata`, schema-shape parity only
+- `GET /v1/namespaces/:namespace/schema`, schema-shape parity only
+- `POST /v1/namespaces/:namespace/schema`, schema-shape parity only
+- `GET /v1/namespaces/:namespace/hint_cache_warm`, status parity only
+- exact status/body parity for include/exclude projection validation
+
+## Covered by local Rust tests only
+
+- schema get/update helpers
+- schema type validation and vector dimensionality checks
+- FTS schema knobs: `k1`, `b`, `k3`, `language`, `stemming`, `remove_stopwords`, `ascii_folding`, `case_sensitive`, `max_token_length`, `tokenizer`
+- FTS tokenizer modes: `word_v0`, `word_v1`, `word_v2`, `word_v3`, and `pre_tokenized_array`
+- non-English stopword removal using the supported TPUF language list
+- schema options: `filterable`, `regex`, `glob`, `fuzzy`, `full_text_search`, `ann`, `sparse_knn`
+- vector base64 input and output
+- `export_namespace` helper
+- metadata pinning helper
+- namespace delete helper
+- `limit.per` for order-by-attribute queries
+- multiple-attribute order-by, local extension for dashboard experiments; live docs currently describe ordering by one attribute
+- `Saturate`, `Decay`, and `Dist` rank operators
+- recall ground-truth projection
+- explain-query plan text
+
+## Known gaps
+
+- deprecated `GET /v1/namespaces/:namespace` columnar export
+- live branch parity: the current test key returns `403` for `branch_from_namespace`
+- full live `explain_query` parity: the live endpoint returned `400` (`index does not exist, cannot explain`) for the temp namespace
+- live pinning parity: micropuffer has a metadata helper, but this is not verified against live pinning because it can have account and billing effects
+- exact billing and performance values
+- exact async/indexing behavior, including approximate metadata lag
+- exact error text and status-code parity for all validation failures
+- exact TPUF tokenizer parity for `word_v0` through `word_v3`; micropuffer models the documented differences, but does not embed TPUF's exact Unicode v10/v16/v17 segmenter tables
+- exact stemming implementation parity beyond the shared Snowball language families
+
+## Spec/live mismatches found while testing
+
+- OpenAPI allows `include_attributes: false`, but live turbopuffer currently rejects it with `include_attributes must be true or an array`.
+- OpenAPI lists BM25 array-token variants, but live turbopuffer currently rejects `["text", "BM25", ["quick", "fish"]]`.
+- Ungrouped aggregation rejects `top_k`; grouped aggregation requires a top-k style limit.

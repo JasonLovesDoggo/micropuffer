@@ -1,0 +1,51 @@
+{
+  "namespaces": [
+    {
+      "name": "expertise",
+      "documents": [
+        {
+          "id": "expertise:doc:001",
+          "vector": [0.0, 0.0, 0.1],
+          "sparse_vector": { "rust": 1.0, "search": 0.8 },
+          "title": "Rust vector search engineer",
+          "body": "Builds local BM25 vector hybrid query engines for dashboards.",
+          "tenant_id": "stanley-production",
+          "region": "aws-us-east-1",
+          "permissions": ["admin", "read"],
+          "tags": ["rust", "search"],
+          "score": 97,
+          "timestamp": "2026-05-30T16:17:28Z",
+          "public": true
+        },
+        {
+          "id": "expertise:doc:002",
+          "vector": [0.2, 0.1, 0.1],
+          "sparse_vector": { "typescript": 1.0, "dashboard": 0.9 },
+          "title": "Dashboard prototype specialist",
+          "body": "Designs query workbenches, namespace tables, and local mock data.",
+          "tenant_id": "stanley-staging",
+          "region": "aws-us-east-1",
+          "permissions": ["read"],
+          "tags": ["typescript", "dashboard"],
+          "score": 81,
+          "timestamp": "2026-05-29T10:00:00Z",
+          "public": false
+        },
+        {
+          "id": "expertise:doc:003",
+          "vector": [0.8, 0.6, 0.4],
+          "sparse_vector": { "bm25": 1.0, "hybrid": 0.6 },
+          "title": "Hybrid search relevance tuning",
+          "body": "Combines BM25, sparse vectors, and dense vector search for recall.",
+          "tenant_id": "stanley-production",
+          "region": "aws-us-west-2",
+          "permissions": ["read", "support"],
+          "tags": ["bm25", "hybrid"],
+          "score": 89,
+          "timestamp": "2026-05-28T12:00:00Z",
+          "public": true
+        }
+      ]
+    }
+  ]
+}
