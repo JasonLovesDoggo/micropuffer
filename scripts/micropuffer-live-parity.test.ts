@@ -473,6 +473,32 @@ async function assertSchemaUpdateParity(): Promise<void> {
   );
   expect(requireObject(miniUnknown.category, "micropuffer category schema").not_a_real_schema_option)
     .toBeUndefined();
+
+  const missingTypeSchemaOption: JsonObject = {
+    category: {
+      regex: true
+    }
+  };
+  const liveMissingType = await liveError(
+    "POST",
+    `/v1/namespaces/${encodeURIComponent(namespaceName)}/schema`,
+    missingTypeSchemaOption
+  );
+  const miniMissingType = miniUpdateSchemaError(namespaceName, missingTypeSchemaOption);
+  expectErrorParity(miniMissingType, liveMissingType);
+
+  const wrappedSchemaUpdate: JsonObject = {
+    schema: {
+      category: "string"
+    }
+  };
+  const liveWrapped = await liveError(
+    "POST",
+    `/v1/namespaces/${encodeURIComponent(namespaceName)}/schema`,
+    wrappedSchemaUpdate
+  );
+  const miniWrapped = miniUpdateSchemaError(namespaceName, wrappedSchemaUpdate);
+  expectErrorParity(miniWrapped, liveWrapped);
 }
 
 async function assertWarmCacheParity(): Promise<void> {
