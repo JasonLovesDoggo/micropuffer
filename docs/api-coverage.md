@@ -66,6 +66,7 @@ Sources checked:
 - export helper filters and projections beyond the deprecated live endpoint
 - metadata pinning helper
 - namespace delete helper
+- WASM `*Response` helpers for HTTP-style status/body mock envelopes
 - `Saturate`, `Decay`, and `Dist` rank operators
 - recall ground-truth projection
 - explain-query plan text
