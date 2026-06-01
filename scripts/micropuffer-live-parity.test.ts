@@ -649,6 +649,32 @@ async function assertRecallParity(): Promise<void> {
     "micropuffer recall response"
   );
   expectJsonParity(live, mini);
+
+  const rankedRequest: JsonObject = {
+    top_k: 2,
+    rank_by: ["text", "BM25", "walrus"]
+  };
+  const miniRanked = parseJsonObject(
+    micropuffer.recall(namespaceName, JSON.stringify(rankedRequest)),
+    "micropuffer ranked recall response"
+  );
+  expect(miniRanked.avg_recall).toBe(1);
+  expect(miniRanked.avg_exhaustive_count).toBe(2);
+  expect(miniRanked.avg_ann_count).toBe(2);
+  try {
+    const liveRanked = await liveJson(
+      "POST",
+      `/v1/namespaces/${encodeURIComponent(namespaceName)}/_debug/recall`,
+      rankedRequest
+    );
+    expectJsonParity(liveRanked, miniRanked);
+  } catch (error) {
+    if (error instanceof HttpError && error.status === 404) {
+      console.info("Skipping ranked recall live parity: live endpoint returned HTTP 404.");
+      return;
+    }
+    throw error;
+  }
 }
 
 async function assertExplainQueryParity(): Promise<void> {
@@ -848,7 +874,9 @@ async function assertErrorParity(): Promise<void> {
     { num: 1, top_k: "bad" },
     { num: 1, top_k: 0 },
     { num: 1, top_k: 1, filters: "bad" },
-    { num: 1, top_k: 1, include_ground_truth: "bad" }
+    { num: 1, top_k: 1, include_ground_truth: "bad" },
+    { num: 2, top_k: 1, rank_by: ["vector", "ANN", [1, 0]] },
+    { num: 1, top_k: 1, rank_by: "bad" }
   ];
   for (const invalidRecallRequest of invalidRecallRequests) {
     expectErrorParity(

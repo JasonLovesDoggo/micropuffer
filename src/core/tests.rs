@@ -3489,6 +3489,50 @@ fn recall_and_explain_query_match_debug_endpoint_shapes() {
     assert_eq!(capped_recall["avg_recall"], 1.0);
     assert_eq!(capped_recall["avg_exhaustive_count"], 10.0);
     assert_eq!(capped_recall["avg_ann_count"], 10.0);
+    let ann_ranked_recall = clone
+        .recall(
+            "debug",
+            &json!({
+                "num": null,
+                "top_k": 2,
+                "rank_by": ["vector", "ANN", [1.0, 0.0]]
+            }),
+        )
+        .unwrap();
+    assert_eq!(ann_ranked_recall["avg_recall"], 1.0);
+    assert_eq!(ann_ranked_recall["avg_exhaustive_count"], 2.0);
+    assert_eq!(ann_ranked_recall["avg_ann_count"], 2.0);
+    let bm25_ranked_recall = clone
+        .recall(
+            "debug",
+            &json!({
+                "top_k": 2,
+                "rank_by": ["text", "BM25", "walrus"]
+            }),
+        )
+        .unwrap();
+    assert_eq!(bm25_ranked_recall["avg_recall"], 1.0);
+    assert_eq!(bm25_ranked_recall["avg_exhaustive_count"], 2.0);
+    assert_eq!(bm25_ranked_recall["avg_ann_count"], 2.0);
+    let ranked_num = clone
+        .recall(
+            "debug",
+            &json!({"num": 2, "top_k": 1, "rank_by": ["vector", "ANN", [1.0, 0.0]]}),
+        )
+        .unwrap_err();
+    assert_eq!(ranked_num.status_code(), 400);
+    assert_eq!(
+        ranked_num.to_string(),
+        "💔 rank_by and num cannot be specified together"
+    );
+    let invalid_rank_by = clone
+        .recall("debug", &json!({"num": 1, "top_k": 1, "rank_by": "bad"}))
+        .unwrap_err();
+    assert_eq!(invalid_rank_by.status_code(), 422);
+    assert_eq!(
+        invalid_rank_by.to_string(),
+        "Failed to deserialize the JSON body into the target type: rank_by: data did not match any variant of enum a valid variant of RankInput at line 1 column 35"
+    );
     let invalid_num = clone
         .recall("debug", &json!({"num": "bad", "top_k": 1}))
         .unwrap_err();
