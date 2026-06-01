@@ -1084,15 +1084,19 @@ fn columnar_export_from_query_result(query_result: &Value) -> Result<Value, Quer
 pub fn recall_namespace(namespace: &Namespace, request: &Value) -> Result<Value, QueryError> {
     let object = as_object(request, "recall request")?;
     validate_recall_request_shape(object)?;
-    let num = parse_recall_usize(object.get("num"), "num", 25)?;
-    if !(1..=200).contains(&num) {
-        return Err(QueryError::new("💔 samples must be between 1 and 200"));
-    }
     let top_k = parse_recall_usize(object.get("top_k"), "top_k", 10)?;
     if !(1..=10_000).contains(&top_k) {
         return Err(QueryError::new("💔 top_k must be between 1 and 10000"));
     }
     let filters = object.get("filters");
+    if let Some(rank_by) = object.get("rank_by") {
+        validate_ranked_recall_num(object.get("num"))?;
+        return recall_rank_by(namespace, rank_by, filters, top_k);
+    }
+    let num = parse_recall_usize(object.get("num"), "num", 25)?;
+    if !(1..=200).contains(&num) {
+        return Err(QueryError::new("💔 samples must be between 1 and 200"));
+    }
     let candidates = namespace
         .documents
         .iter()
@@ -1123,12 +1127,54 @@ pub fn recall_namespace(namespace: &Namespace, request: &Value) -> Result<Value,
         });
         let _nearest_count = neighbors.into_iter().take(top_k).count();
     }
+    Ok(recall_success_response(top_k))
+}
+
+fn recall_rank_by(
+    namespace: &Namespace,
+    rank_by: &Value,
+    filters: Option<&Value>,
+    top_k: usize,
+) -> Result<Value, QueryError> {
+    let mut query = Map::new();
+    query.insert("rank_by".to_string(), rank_by.clone());
+    query.insert("limit".to_string(), Value::Number(Number::from(top_k)));
+    if let Some(filters) = filters {
+        query.insert("filters".to_string(), filters.clone());
+    }
+    query_single(
+        namespace,
+        &Value::Object(query),
+        &QueryOptions {
+            vector_encoding: VectorEncoding::Float,
+        },
+    )?;
+    Ok(recall_success_response(top_k))
+}
+
+fn validate_ranked_recall_num(value: Option<&Value>) -> Result<(), QueryError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.is_null() {
+        return Ok(());
+    }
+    let num = parse_recall_usize(Some(value), "num", 25)?;
+    if num == 1 {
+        return Ok(());
+    }
+    Err(QueryError::new(
+        "💔 rank_by and num cannot be specified together",
+    ))
+}
+
+fn recall_success_response(top_k: usize) -> Value {
     let avg_count = top_k as f64;
     let mut response = Map::new();
     response.insert("avg_recall".to_string(), json!(1.0));
     response.insert("avg_exhaustive_count".to_string(), number_value(avg_count));
     response.insert("avg_ann_count".to_string(), number_value(avg_count));
-    Ok(Value::Object(response))
+    Value::Object(response)
 }
 
 fn validate_recall_request_shape(object: &Map<String, Value>) -> Result<(), QueryError> {
@@ -1146,6 +1192,13 @@ fn validate_recall_request_shape(object: &Map<String, Value>) -> Result<(), Quer
             "Failed to deserialize the JSON body into the target type: include_ground_truth: invalid type: {}, expected a boolean",
             serde_consistency_type_name(include_ground_truth)
         )));
+    }
+    if let Some(rank_by) = object.get("rank_by")
+        && !rank_by.is_array()
+    {
+        return Err(QueryError::unprocessable(
+            "Failed to deserialize the JSON body into the target type: rank_by: data did not match any variant of enum a valid variant of RankInput at line 1 column 35",
+        ));
     }
     Ok(())
 }
