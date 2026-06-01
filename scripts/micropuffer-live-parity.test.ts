@@ -20,7 +20,8 @@ const NAMESPACE_PREFIX = "micropuffer-live-parity";
 const namespaceName = `${NAMESPACE_PREFIX}-${Date.now()}-${process.pid}`;
 const copyNamespaceName = `${namespaceName}-copy`;
 const branchNamespaceName = `${namespaceName}-branch`;
-const namespacesToDelete = [namespaceName, copyNamespaceName, branchNamespaceName];
+const euclideanNamespaceName = `${namespaceName}-euclidean`;
+const namespacesToDelete = [namespaceName, copyNamespaceName, branchNamespaceName, euclideanNamespaceName];
 
 loadEnv();
 
@@ -282,6 +283,7 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
   await assertExplainQueryParity();
   await assertErrorParity();
   await assertInvalidNamespaceParity();
+  await assertEuclideanDistanceMetricParity();
   await assertBranchParityIfAllowed(afterDeleteLookup);
 });
 
@@ -840,6 +842,43 @@ async function assertInvalidNamespaceParity(): Promise<void> {
     expect(mini.status).toBe(live.status);
     expect(mini.body).toBe(live.body);
   }
+}
+
+async function assertEuclideanDistanceMetricParity(): Promise<void> {
+  await deleteLiveNamespace(euclideanNamespaceName);
+  const write: JsonObject = {
+    distance_metric: "euclidean",
+    upsert_rows: [
+      { id: 1, vector: [1, 0] },
+      { id: 2, vector: [0, 2] }
+    ]
+  };
+  expectJsonParity(await liveWrite(euclideanNamespaceName, write), miniWrite(euclideanNamespaceName, write));
+
+  const query: JsonObject = {
+    rank_by: ["vector", "ANN", [0, 0]],
+    limit: 2,
+    include_attributes: ["vector"]
+  };
+  expectJsonParity(await liveQuery(euclideanNamespaceName, query), miniQuery(euclideanNamespaceName, query));
+
+  const liveMetadata = await liveJson(
+    "GET",
+    `/v1/namespaces/${encodeURIComponent(euclideanNamespaceName)}/metadata`
+  );
+  const miniMetadata = parseJsonObject(
+    micropuffer.metadata(euclideanNamespaceName),
+    "micropuffer euclidean metadata response"
+  );
+  expect(
+    requireObject(requireObject(liveMetadata.schema, "live euclidean metadata schema").vector, "live vector schema")
+      .ann
+  ).toStrictEqual(
+    requireObject(
+      requireObject(miniMetadata.schema, "micropuffer euclidean metadata schema").vector,
+      "micropuffer vector schema"
+    ).ann
+  );
 }
 
 async function assertBranchParityIfAllowed(lookup: JsonObject): Promise<void> {

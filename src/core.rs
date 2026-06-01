@@ -331,6 +331,7 @@ fn default_encryption() -> Value {
 #[serde(rename_all = "snake_case")]
 pub enum DistanceMetric {
     CosineDistance,
+    Euclidean,
     #[default]
     EuclideanSquared,
 }
@@ -339,12 +340,13 @@ impl DistanceMetric {
     fn parse(value: &Value) -> Result<Self, QueryError> {
         match value.as_str() {
             Some("cosine_distance") => Ok(Self::CosineDistance),
+            Some("euclidean") => Ok(Self::Euclidean),
             Some("euclidean_squared") => Ok(Self::EuclideanSquared),
             Some(metric) => Err(QueryError::unprocessable(format!(
                 "Failed to deserialize the JSON body into the target type: distance_metric: unknown variant `{metric}`, expected one of `Unknown`, `euclidean_squared`, `cosine_distance`, `euclidean`, `Query`"
             ))),
             _ => Err(QueryError::unprocessable(
-                "Failed to deserialize the JSON body into the target type: distance_metric: invalid type, expected `cosine_distance` or `euclidean_squared`",
+                "Failed to deserialize the JSON body into the target type: distance_metric: invalid type, expected `cosine_distance`, `euclidean`, or `euclidean_squared`",
             )),
         }
     }
@@ -352,6 +354,7 @@ impl DistanceMetric {
     fn as_write_error_str(self) -> &'static str {
         match self {
             Self::CosineDistance => "cosine_distance",
+            Self::Euclidean => "euclidean",
             Self::EuclideanSquared => "euclidean_squared",
         }
     }
@@ -4670,7 +4673,7 @@ fn dense_distance_to_query(
         let doc_value = value_as_f64(doc_value)
             .ok_or_else(|| QueryError::new(format!("{attr}[{index}] must be numeric.")))?;
         match distance_metric {
-            DistanceMetric::EuclideanSquared => {
+            DistanceMetric::Euclidean | DistanceMetric::EuclideanSquared => {
                 let delta = doc_value - *query_value;
                 distance += delta * delta;
             }
@@ -4681,6 +4684,7 @@ fn dense_distance_to_query(
         }
     }
     match distance_metric {
+        DistanceMetric::Euclidean => Ok(distance.sqrt()),
         DistanceMetric::EuclideanSquared => Ok(distance),
         DistanceMetric::CosineDistance => {
             let norm = norm.sqrt();
@@ -4720,7 +4724,7 @@ fn dense_distance_values(
     let mut distance = 0.0;
     for (doc_value, query_value) in values.iter().zip(query.values.iter()) {
         match distance_metric {
-            DistanceMetric::EuclideanSquared => {
+            DistanceMetric::Euclidean | DistanceMetric::EuclideanSquared => {
                 let delta = doc_value - query_value;
                 distance += delta * delta;
             }
@@ -4731,6 +4735,7 @@ fn dense_distance_values(
         }
     }
     match distance_metric {
+        DistanceMetric::Euclidean => distance.sqrt(),
         DistanceMetric::EuclideanSquared => distance,
         DistanceMetric::CosineDistance => {
             let norm = norm.sqrt();
@@ -4756,7 +4761,7 @@ fn dense_distance_f32_chunks(
     {
         let doc_value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f64;
         match distance_metric {
-            DistanceMetric::EuclideanSquared => {
+            DistanceMetric::Euclidean | DistanceMetric::EuclideanSquared => {
                 let delta = doc_value - query_value;
                 distance += delta * delta;
             }
@@ -4767,6 +4772,7 @@ fn dense_distance_f32_chunks(
         }
     }
     match distance_metric {
+        DistanceMetric::Euclidean => distance.sqrt(),
         DistanceMetric::EuclideanSquared => distance,
         DistanceMetric::CosineDistance => {
             let norm = norm.sqrt();
