@@ -1982,17 +1982,14 @@ fn normalize_schema_response_definition(
     };
     config.insert("type".to_string(), Value::String(schema_type.clone()));
     if !config.contains_key("filterable") {
-        let inferred_filterable = attribute != "id"
-            && !is_dense_vector_type(&schema_type)
-            && matches!(definition, Value::String(_));
-        config.insert(
-            "filterable".to_string(),
-            if inferred_filterable {
-                Value::Bool(true)
-            } else {
-                Value::Null
-            },
-        );
+        let filterable = if attribute == "id" || is_dense_vector_type(&schema_type) {
+            Value::Null
+        } else if matches!(definition, Value::String(_)) {
+            Value::Bool(true)
+        } else {
+            Value::Bool(false)
+        };
+        config.insert("filterable".to_string(), filterable);
     }
     if let Some(full_text_search) = config.get("full_text_search").cloned()
         && full_text_search != Value::Null
@@ -2011,6 +2008,7 @@ fn normalize_schema_response_definition(
     } else if attribute == "id" {
         config.remove("ann");
     }
+    config.remove("sparse_knn");
     Ok((attribute.to_string(), Value::Object(config)))
 }
 
