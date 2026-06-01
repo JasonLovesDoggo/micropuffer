@@ -633,6 +633,18 @@ async function assertErrorParity(): Promise<void> {
   );
   expectErrorParity(miniDeleteNamespaceError(missingNamespace), liveMissingDelete);
 
+  const invalidSchemaUpdate: JsonObject = {
+    category: "int"
+  };
+  const liveSchemaTypeChange = await liveError(
+    "POST",
+    `/v1/namespaces/${encodeURIComponent(namespaceName)}/schema`,
+    invalidSchemaUpdate
+  );
+  const miniSchemaTypeChange = miniUpdateSchemaError(namespaceName, invalidSchemaUpdate);
+  expectErrorParity(miniSchemaTypeChange, liveSchemaTypeChange);
+  expect(miniSchemaTypeChange.body.attribute).toBe(liveSchemaTypeChange.body.attribute);
+
   const metricNamespace = `${namespaceName}-metric-error`;
   await deleteLiveNamespace(metricNamespace);
   const missingMetricWrite: JsonObject = {
@@ -774,6 +786,14 @@ function miniWriteError(namespace: string, request: JsonObject): ErrorResult {
     "micropuffer write response envelope"
   );
   return errorResultFromEnvelope(response, "write");
+}
+
+function miniUpdateSchemaError(namespace: string, request: JsonObject): ErrorResult {
+  const response = parseJsonObject(
+    micropuffer.updateSchemaResponse(namespace, JSON.stringify(request)),
+    "micropuffer update schema response envelope"
+  );
+  return errorResultFromEnvelope(response, "update schema");
 }
 
 function miniDeleteNamespaceError(namespace: string): ErrorResult {

@@ -2182,7 +2182,12 @@ fn schema_rejects_type_changes_and_too_many_vector_columns() {
     let type_change = clone
         .write("schema-change", &json!({"schema": {"title": "int"}}))
         .unwrap_err();
-    assert!(type_change.to_string().contains("Changing the type"));
+    assert_eq!(type_change.status_code(), 400);
+    assert_eq!(
+        type_change.to_string(),
+        "🙅 invalid schema update for attribute 'title': cannot change attribute type from string to int"
+    );
+    assert_eq!(type_change.body_fields()["attribute"], "title");
 
     let vector_count = clone
         .write(

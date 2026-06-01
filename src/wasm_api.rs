@@ -42,10 +42,17 @@ struct HttpResponse {
 }
 
 fn error_body(error: &QueryError) -> Value {
-    json!({
+    let mut body = json!({
         "status": "error",
         "error": error.to_string()
-    })
+    });
+    let Some(object) = body.as_object_mut() else {
+        return body;
+    };
+    for (key, value) in error.body_fields() {
+        object.insert(key.clone(), value.clone());
+    }
+    body
 }
 
 fn http_response(result: Result<Value, QueryError>) -> Result<String, JsValue> {
