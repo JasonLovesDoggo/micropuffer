@@ -544,7 +544,7 @@ async function assertSchemaUpdateParity(): Promise<void> {
     micropuffer.updateSchema(namespaceName, JSON.stringify(schemaUpdate)),
     "micropuffer schema update response"
   );
-  expect(schemaTypes({ schema: mini })).toStrictEqual(schemaTypes({ schema: live }));
+  expectJsonParity(live, mini);
 
   const unknownSchemaOption: JsonObject = {
     category: {
