@@ -59,6 +59,7 @@ Sources checked:
 - `POST /v1/namespaces/:namespace/_debug/recall`, exact basic response parity for deterministic small namespaces, including live's current omission of `ground_truth`
   - documented `rank_by` requests are supported locally; live currently returned `404` for the temp namespace, so live parity is skipped until the endpoint returns a stable success shape
 - `POST /v2/namespaces/:namespace/explain_query`, local shape only; live returned `400` for the temp namespace/index state
+- `DELETE /v2/namespaces/:namespace`, exact success response parity and missing-namespace error parity
 - deprecated `GET /v1/namespaces/:namespace` columnar export
 - `GET /v1/namespaces`, including prefix, query-string `page_size` parsing, live-style `cursor` pagination, exhausted-page `next_cursor: null`, page-size error parity, and malformed-cursor error parity
 - `GET /v1/namespaces/:namespace/metadata`, exact schema and stable-field parity only
@@ -96,7 +97,6 @@ Sources checked:
 - vector base64 input and output
 - export helper filters and projections beyond the deprecated live endpoint
 - metadata pinning helper
-- namespace delete helper
 - WASM `*Response` helpers for HTTP-style status/body mock envelopes
 - `Saturate`, `Decay`, and `Dist` rank operators
 - current documented filter-write partial limits: 50k rows for `patch_by_filter`, 5M rows for `delete_by_filter`

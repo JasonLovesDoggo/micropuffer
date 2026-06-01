@@ -28,6 +28,7 @@ const stringIdNamespaceName = `${namespaceName}-id-string`;
 const uintIdNamespaceName = `${namespaceName}-id-uint`;
 const inferredUintIdNamespaceName = `${namespaceName}-id-inferred-uint`;
 const invalidIdSchemaNamespaceName = `${namespaceName}-id-invalid-schema`;
+const deleteNamespaceName = `${namespaceName}-delete`;
 const namespacesToDelete = [
   namespaceName,
   copyNamespaceName,
@@ -39,7 +40,8 @@ const namespacesToDelete = [
   stringIdNamespaceName,
   uintIdNamespaceName,
   inferredUintIdNamespaceName,
-  invalidIdSchemaNamespaceName
+  invalidIdSchemaNamespaceName,
+  deleteNamespaceName
 ];
 
 loadEnv();
@@ -355,6 +357,7 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
   await assertUuidIdSchemaParity();
   await assertTypedIdSchemaParity();
   await assertBranchParityIfAllowed(afterDeleteLookup);
+  await assertDeleteNamespaceParity();
 });
 
 async function assertColumnAndConditionParity(): Promise<void> {
@@ -461,6 +464,21 @@ async function assertCopyParity(lookup: JsonObject): Promise<void> {
   const miniCopy = miniWrite(copyNamespaceName, { copy_from_namespace: namespaceName });
   expect(miniCopy.rows_affected).toBe(liveCopy.rows_affected);
   expectJsonParity(await liveQuery(copyNamespaceName, lookup), miniQuery(copyNamespaceName, lookup));
+}
+
+async function assertDeleteNamespaceParity(): Promise<void> {
+  const request: JsonObject = {
+    distance_metric: "cosine_distance",
+    upsert_rows: [{ id: 1, vector: [1, 0] }]
+  };
+  expectJsonParity(await liveWrite(deleteNamespaceName, request), miniWrite(deleteNamespaceName, request));
+  const live = await liveJson("DELETE", `/v2/namespaces/${encodeURIComponent(deleteNamespaceName)}`);
+  const mini = parseJsonObject(
+    micropuffer.deleteNamespaceResponse(deleteNamespaceName),
+    "micropuffer delete namespace response envelope"
+  );
+  expect(mini.status).toBe(200);
+  expectJsonParity(live, requireObject(mini.body, "micropuffer delete namespace response body"));
 }
 
 async function assertDeprecatedExportParity(): Promise<void> {
