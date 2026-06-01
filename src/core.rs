@@ -428,16 +428,18 @@ impl TypedDocumentFields {
 struct NamespaceQueryIndexes {
     equality: HashMap<String, EqualityAttributeIndex>,
     order: HashMap<OrderIndexKey, Vec<OrderIndexEntry>>,
+    group_counts: HashMap<String, GroupCountIndex>,
 }
 
 impl NamespaceQueryIndexes {
     fn clear(&mut self) {
         self.equality.clear();
         self.order.clear();
+        self.group_counts.clear();
     }
 
     fn is_empty(&self) -> bool {
-        self.equality.is_empty() && self.order.is_empty()
+        self.equality.is_empty() && self.order.is_empty() && self.group_counts.is_empty()
     }
 }
 
@@ -465,7 +467,7 @@ impl NamespaceQueryIndexCache {
 
 #[derive(Debug, Clone, Default)]
 struct EqualityAttributeIndex {
-    postings: HashMap<ScalarEqKey, BTreeSet<String>>,
+    postings: HashMap<ScalarEqKey, BTreeSet<usize>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -481,9 +483,28 @@ struct OrderIndexKey(Vec<(String, SortDirection)>);
 
 #[derive(Debug, Clone)]
 struct OrderIndexEntry {
-    id_key: String,
+    doc_index: usize,
     id: Value,
     values: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct GroupCountIndex {
+    counts: HashMap<ScalarEqKey, GroupCountEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct GroupCountEntry {
+    value: Value,
+    count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BorrowedScalarKey<'a> {
+    Null,
+    Bool(bool),
+    Number(u64),
+    String(&'a str),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -2450,17 +2471,17 @@ fn upsert_document(
             return Ok(false);
         }
         let previous = namespace.documents[index].clone();
-        remove_document_from_cached_indexes(namespace, &previous);
+        remove_document_from_cached_indexes(namespace, index, &previous);
         namespace.documents[index] = Document::new(row.id, row.attributes);
         let updated = namespace.documents[index].clone();
-        insert_document_into_cached_indexes(namespace, &updated);
+        insert_document_into_cached_indexes(namespace, index, &updated);
     } else {
         let index = namespace.documents.len();
         let id = row.id;
         id_index.insert_new(&id, index);
         namespace.documents.push(Document::new(id, row.attributes));
         let inserted = namespace.documents[index].clone();
-        insert_document_into_cached_indexes(namespace, &inserted);
+        insert_document_into_cached_indexes(namespace, index, &inserted);
     }
     Ok(true)
 }
@@ -2482,12 +2503,12 @@ fn patch_document(
         return Ok(false);
     }
     let previous = namespace.documents[index].clone();
-    remove_document_from_cached_indexes(namespace, &previous);
+    remove_document_from_cached_indexes(namespace, index, &previous);
     for (key, value) in row.attributes {
         namespace.documents[index].set_attribute(key, value);
     }
     let updated = namespace.documents[index].clone();
-    insert_document_into_cached_indexes(namespace, &updated);
+    insert_document_into_cached_indexes(namespace, index, &updated);
     Ok(true)
 }
 
@@ -2514,11 +2535,6 @@ fn delete_documents(
     }
     if !indexes.is_empty() {
         let selected = indexes.into_iter().collect::<BTreeSet<_>>();
-        for index in &selected {
-            if let Some(document) = namespace.documents.get(*index) {
-                remove_document_from_cached_indexes(namespace, document);
-            }
-        }
         let mut kept = Vec::with_capacity(namespace.documents.len() - selected.len());
         for (index, document) in namespace.documents.drain(..).enumerate() {
             if !selected.contains(&index) {
@@ -2526,6 +2542,7 @@ fn delete_documents(
             }
         }
         namespace.documents = kept;
+        namespace.query_indexes.guard().clear();
         id_index.rebuild(namespace);
     }
     Ok(deleted)
@@ -2559,10 +2576,11 @@ fn delete_by_filter(
         .take(DELETE_BY_FILTER_LIMIT)
         .collect::<BTreeSet<_>>();
     let rows_remaining = matched_count > DELETE_BY_FILTER_LIMIT;
-    for index in &selected {
-        if let Some(document) = namespace.documents.get(*index) {
-            remove_document_from_cached_indexes(namespace, document);
-        }
+    if selected.is_empty() {
+        return Ok(FilterWriteOutcome {
+            ids: Vec::new(),
+            rows_remaining,
+        });
     }
     let mut deleted = Vec::new();
     let mut kept = Vec::new();
@@ -2574,6 +2592,7 @@ fn delete_by_filter(
         }
     }
     namespace.documents = kept;
+    namespace.query_indexes.guard().clear();
     Ok(FilterWriteOutcome {
         ids: deleted,
         rows_remaining,
@@ -2628,10 +2647,16 @@ fn patch_by_filter(
     let mut patched = Vec::new();
     let previous = selected
         .iter()
-        .filter_map(|index| namespace.documents.get(*index).cloned())
+        .filter_map(|index| {
+            namespace
+                .documents
+                .get(*index)
+                .cloned()
+                .map(|document| (*index, document))
+        })
         .collect::<Vec<_>>();
-    for document in &previous {
-        remove_document_from_cached_indexes(namespace, document);
+    for (index, document) in &previous {
+        remove_document_from_cached_indexes(namespace, *index, document);
     }
     for (index, document) in namespace.documents.iter_mut().enumerate() {
         if selected.contains(&index) {
@@ -2643,10 +2668,16 @@ fn patch_by_filter(
     }
     let updated = selected
         .iter()
-        .filter_map(|index| namespace.documents.get(*index).cloned())
+        .filter_map(|index| {
+            namespace
+                .documents
+                .get(*index)
+                .cloned()
+                .map(|document| (*index, document))
+        })
         .collect::<Vec<_>>();
-    for document in &updated {
-        insert_document_into_cached_indexes(namespace, document);
+    for (index, document) in &updated {
+        insert_document_into_cached_indexes(namespace, *index, document);
     }
     Ok(FilterWriteOutcome {
         ids: patched,
@@ -3244,14 +3275,9 @@ fn indexed_order_ranked<'a>(
     if filter_candidates.as_ref().is_some_and(Vec::is_empty) {
         return Ok(Some(Vec::new()));
     }
-    let order = order_index(namespace, &order_key);
-    let mut ranked = Vec::with_capacity(limit.min(order.len()));
+    let order = order_index_positions(namespace, &order_key, filter_candidates.as_deref(), limit);
+    let mut ranked = Vec::with_capacity(order.len());
     for index in order {
-        if let Some(candidates) = &filter_candidates
-            && candidates.binary_search(&index).is_err()
-        {
-            continue;
-        }
         let document = namespace
             .documents
             .get(index)
@@ -3356,119 +3382,206 @@ fn equality_postings(namespace: &Namespace, attr: &str, key: &ScalarEqKey) -> Ve
         .equality
         .entry(attr.to_string())
         .or_insert_with(|| build_equality_index(namespace, attr));
-    let keys = index.postings.get(key).cloned().unwrap_or_default();
-    drop(indexes);
-    document_keys_to_sorted_positions(namespace, keys.iter())
+    index
+        .postings
+        .get(key)
+        .map(|postings| postings.iter().copied().collect())
+        .unwrap_or_default()
 }
 
 fn build_equality_index(namespace: &Namespace, attr: &str) -> EqualityAttributeIndex {
-    let mut postings: HashMap<ScalarEqKey, BTreeSet<String>> = HashMap::new();
-    for document in &namespace.documents {
+    let mut postings: HashMap<ScalarEqKey, BTreeSet<usize>> = HashMap::new();
+    for (index, document) in namespace.documents.iter().enumerate() {
         let value = document_attr(document, attr).unwrap_or(&Value::Null);
         if let Some(key) = scalar_eq_key(value) {
-            postings
-                .entry(key)
-                .or_default()
-                .insert(id_key(&document.id));
+            postings.entry(key).or_default().insert(index);
         }
     }
     EqualityAttributeIndex { postings }
 }
 
-fn order_index(namespace: &Namespace, key: &OrderIndexKey) -> Vec<usize> {
-    let positions_by_id = document_positions_by_id_key(namespace);
+fn group_count_index(namespace: &Namespace, attr: &str) -> Option<Vec<GroupCountEntry>> {
     let mut indexes = namespace.query_indexes.guard();
+    if !indexes.group_counts.contains_key(attr) {
+        let index = build_group_count_index(namespace, attr)?;
+        indexes.group_counts.insert(attr.to_string(), index);
+    }
     indexes
+        .group_counts
+        .get(attr)
+        .map(|index| index.counts.values().cloned().collect())
+}
+
+fn build_group_count_index(namespace: &Namespace, attr: &str) -> Option<GroupCountIndex> {
+    let mut index = GroupCountIndex::default();
+    for document in &namespace.documents {
+        if !increment_group_count(&mut index, document_attr(document, attr)) {
+            return None;
+        }
+    }
+    Some(index)
+}
+
+fn increment_group_count(index: &mut GroupCountIndex, value: Option<&Value>) -> bool {
+    let Some((key, value)) = scalar_group_key_and_value(value) else {
+        return false;
+    };
+    let entry = index
+        .counts
+        .entry(key)
+        .or_insert(GroupCountEntry { value, count: 0 });
+    entry.count += 1;
+    true
+}
+
+fn decrement_group_count(index: &mut GroupCountIndex, value: Option<&Value>) -> bool {
+    let Some((key, _)) = scalar_group_key_and_value(value) else {
+        return false;
+    };
+    let remove_key = if let Some(entry) = index.counts.get_mut(&key) {
+        entry.count = entry.count.saturating_sub(1);
+        entry.count == 0
+    } else {
+        false
+    };
+    if remove_key {
+        index.counts.remove(&key);
+    }
+    true
+}
+
+fn scalar_group_key_and_value(value: Option<&Value>) -> Option<(ScalarEqKey, Value)> {
+    match value {
+        Some(value) => scalar_eq_key(value).map(|key| (key, value.clone())),
+        None => Some((ScalarEqKey::Null, Value::Null)),
+    }
+}
+
+fn order_index_positions(
+    namespace: &Namespace,
+    key: &OrderIndexKey,
+    filter_candidates: Option<&[usize]>,
+    limit: usize,
+) -> Vec<usize> {
+    let mut indexes = namespace.query_indexes.guard();
+    let order = indexes
         .order
         .entry(key.clone())
-        .or_insert_with(|| build_order_index(namespace, key))
-        .iter()
-        .filter_map(|entry| positions_by_id.get(&entry.id_key).copied())
-        .collect()
+        .or_insert_with(|| build_order_index(namespace, key));
+    let position_limit = if filter_candidates.is_some() {
+        order.len()
+    } else {
+        limit
+    };
+    let mut positions = Vec::with_capacity(position_limit.min(order.len()));
+    for entry in order {
+        if let Some(candidates) = filter_candidates
+            && candidates.binary_search(&entry.doc_index).is_err()
+        {
+            continue;
+        }
+        positions.push(entry.doc_index);
+        if positions.len() == position_limit {
+            break;
+        }
+    }
+    positions
 }
 
 fn build_order_index(namespace: &Namespace, key: &OrderIndexKey) -> Vec<OrderIndexEntry> {
     let mut order = namespace
         .documents
         .iter()
-        .map(|document| order_entry_for_document(document, key))
+        .enumerate()
+        .map(|(index, document)| order_entry_for_document(index, document, key))
         .collect::<Vec<_>>();
     order.sort_by(|left, right| compare_order_entries(left, right, key));
     order
 }
 
-fn document_keys_to_sorted_positions<'a>(
+fn remove_document_from_cached_indexes(
     namespace: &Namespace,
-    keys: impl Iterator<Item = &'a String>,
-) -> Vec<usize> {
-    let positions_by_id = document_positions_by_id_key(namespace);
-    let mut positions = keys
-        .filter_map(|key| positions_by_id.get(key).copied())
-        .collect::<Vec<_>>();
-    positions.sort_unstable();
-    positions.dedup();
-    positions
-}
-
-fn document_positions_by_id_key(namespace: &Namespace) -> HashMap<String, usize> {
-    let mut positions = HashMap::with_capacity(namespace.documents.len());
-    for (index, document) in namespace.documents.iter().enumerate() {
-        positions.entry(id_key(&document.id)).or_insert(index);
-    }
-    positions
-}
-
-fn remove_document_from_cached_indexes(namespace: &Namespace, document: &Document) {
+    doc_index: usize,
+    document: &Document,
+) {
     let mut indexes = namespace.query_indexes.guard();
     if indexes.is_empty() {
         return;
     }
-    let document_id_key = id_key(&document.id);
-    for (attribute, index) in &mut indexes.equality {
+    for (attribute, equality_index) in &mut indexes.equality {
         let value = document_attr(document, attribute).unwrap_or(&Value::Null);
         let Some(key) = scalar_eq_key(value) else {
             continue;
         };
-        let remove_key = if let Some(postings) = index.postings.get_mut(&key) {
-            postings.remove(&document_id_key);
+        let remove_key = if let Some(postings) = equality_index.postings.get_mut(&key) {
+            postings.remove(&doc_index);
             postings.is_empty()
         } else {
             false
         };
         if remove_key {
-            index.postings.remove(&key);
+            equality_index.postings.remove(&key);
         }
     }
     for order in indexes.order.values_mut() {
-        order.retain(|entry| entry.id_key != document_id_key);
+        order.retain(|entry| entry.doc_index != doc_index);
+    }
+    let mut invalid_group_indexes = Vec::new();
+    for (attribute, group_index) in &mut indexes.group_counts {
+        if !decrement_group_count(group_index, document_attr(document, attribute)) {
+            invalid_group_indexes.push(attribute.clone());
+        }
+    }
+    for attribute in invalid_group_indexes {
+        indexes.group_counts.remove(&attribute);
     }
 }
 
-fn insert_document_into_cached_indexes(namespace: &Namespace, document: &Document) {
+fn insert_document_into_cached_indexes(
+    namespace: &Namespace,
+    doc_index: usize,
+    document: &Document,
+) {
     let mut indexes = namespace.query_indexes.guard();
     if indexes.is_empty() {
         return;
     }
-    let document_id_key = id_key(&document.id);
-    for (attribute, index) in &mut indexes.equality {
+    for (attribute, equality_index) in &mut indexes.equality {
         let value = document_attr(document, attribute).unwrap_or(&Value::Null);
         if let Some(key) = scalar_eq_key(value) {
-            index
+            equality_index
                 .postings
                 .entry(key)
                 .or_default()
-                .insert(document_id_key.clone());
+                .insert(doc_index);
         }
     }
     for (key, order) in &mut indexes.order {
-        order.retain(|entry| entry.id_key != document_id_key);
-        insert_order_entry(order, key, order_entry_for_document(document, key));
+        order.retain(|entry| entry.doc_index != doc_index);
+        insert_order_entry(
+            order,
+            key,
+            order_entry_for_document(doc_index, document, key),
+        );
+    }
+    let mut invalid_group_indexes = Vec::new();
+    for (attribute, group_index) in &mut indexes.group_counts {
+        if !increment_group_count(group_index, document_attr(document, attribute)) {
+            invalid_group_indexes.push(attribute.clone());
+        }
+    }
+    for attribute in invalid_group_indexes {
+        indexes.group_counts.remove(&attribute);
     }
 }
 
-fn order_entry_for_document(document: &Document, key: &OrderIndexKey) -> OrderIndexEntry {
+fn order_entry_for_document(
+    doc_index: usize,
+    document: &Document,
+    key: &OrderIndexKey,
+) -> OrderIndexEntry {
     OrderIndexEntry {
-        id_key: id_key(&document.id),
+        doc_index,
         id: document.id.clone(),
         values: key
             .0
@@ -3534,6 +3647,19 @@ fn scalar_eq_key(value: &Value) -> Option<ScalarEqKey> {
             ScalarEqKey::Number(normalized.to_bits())
         }),
         Value::String(value) => Some(ScalarEqKey::String(value.clone())),
+        Value::Array(_) | Value::Object(_) => None,
+    }
+}
+
+fn borrowed_scalar_key(value: &Value) -> Option<BorrowedScalarKey<'_>> {
+    match value {
+        Value::Null => Some(BorrowedScalarKey::Null),
+        Value::Bool(value) => Some(BorrowedScalarKey::Bool(*value)),
+        Value::Number(_) => value_as_f64(value).map(|value| {
+            let normalized = if value == 0.0 { 0.0 } else { value };
+            BorrowedScalarKey::Number(normalized.to_bits())
+        }),
+        Value::String(value) => Some(BorrowedScalarKey::String(value.as_str())),
         Value::Array(_) | Value::Object(_) => None,
     }
 }
@@ -4617,6 +4743,37 @@ fn query_aggregations(
 ) -> Result<Value, QueryError> {
     let aggregations = as_object(aggregate_by, "aggregate_by")?;
     let filters = request.get("filters");
+    let count_labels = count_aggregate_labels(aggregations)?;
+    if let Some(labels) = &count_labels {
+        let indexed_candidates = filters
+            .map(|filter| indexed_filter_candidates(namespace, filter))
+            .transpose()?
+            .flatten();
+        let candidates_are_available = filters.is_none() || indexed_candidates.is_some();
+        if candidates_are_available {
+            if let Some(group_by) = request.get("group_by") {
+                if let Some(response) = query_grouped_count_aggregations(
+                    namespace,
+                    request,
+                    group_by,
+                    labels,
+                    indexed_candidates.as_deref(),
+                )? {
+                    return Ok(response);
+                }
+            } else {
+                let count = indexed_candidates
+                    .as_ref()
+                    .map(Vec::len)
+                    .unwrap_or(namespace.documents.len());
+                let mut output = Map::new();
+                for label in labels {
+                    output.insert(label.clone(), Value::Number(Number::from(count)));
+                }
+                return Ok(with_metrics(json!({ "aggregations": output }), namespace));
+            }
+        }
+    }
     let matching = namespace
         .documents
         .iter()
@@ -4637,6 +4794,123 @@ fn query_aggregations(
         output.insert(label.clone(), evaluate_aggregate(aggregate, &matching)?);
     }
     Ok(with_metrics(json!({ "aggregations": output }), namespace))
+}
+
+fn count_aggregate_labels(
+    aggregations: &Map<String, Value>,
+) -> Result<Option<Vec<String>>, QueryError> {
+    let mut labels = Vec::with_capacity(aggregations.len());
+    for (label, aggregate) in aggregations {
+        let array = as_array(aggregate, "aggregate function")?;
+        let op = array
+            .first()
+            .and_then(Value::as_str)
+            .ok_or_else(|| QueryError::new("aggregate function requires an operator."))?;
+        if op != "Count" {
+            return Ok(None);
+        }
+        labels.push(label.clone());
+    }
+    Ok(Some(labels))
+}
+
+fn query_grouped_count_aggregations(
+    namespace: &Namespace,
+    request: &Map<String, Value>,
+    group_by: &Value,
+    labels: &[String],
+    candidate_indexes: Option<&[usize]>,
+) -> Result<Option<Value>, QueryError> {
+    let group_exprs = as_array(group_by, "group_by")?;
+    let [Value::String(attribute)] = group_exprs.as_slice() else {
+        return Ok(None);
+    };
+    let limit = parse_limit(request)?;
+    if candidate_indexes.is_none()
+        && let Some(entries) = group_count_index(namespace, attribute)
+    {
+        return Ok(Some(grouped_count_response(
+            namespace,
+            attribute,
+            labels,
+            entries,
+            limit.total,
+        )));
+    }
+    let mut groups: HashMap<BorrowedScalarKey<'_>, (Value, usize)> = HashMap::new();
+    if let Some(indexes) = candidate_indexes {
+        for index in indexes {
+            let document = namespace
+                .documents
+                .get(*index)
+                .ok_or_else(|| QueryError::new("filter index referenced a missing document."))?;
+            if !count_document_group(document, attribute, &mut groups) {
+                return Ok(None);
+            }
+        }
+    } else {
+        for document in &namespace.documents {
+            if !count_document_group(document, attribute, &mut groups) {
+                return Ok(None);
+            }
+        }
+    }
+    let entries = groups
+        .into_values()
+        .map(|(value, count)| GroupCountEntry { value, count })
+        .collect::<Vec<_>>();
+    Ok(Some(grouped_count_response(
+        namespace,
+        attribute,
+        labels,
+        entries,
+        limit.total,
+    )))
+}
+
+fn grouped_count_response(
+    namespace: &Namespace,
+    attribute: &str,
+    labels: &[String],
+    entries: Vec<GroupCountEntry>,
+    limit: usize,
+) -> Value {
+    let mut keyed_rows = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let mut group_key = Map::new();
+        group_key.insert(attribute.to_string(), entry.value);
+        let sort_key = Value::Object(group_key.clone()).to_string();
+        for label in labels {
+            group_key.insert(label.clone(), Value::Number(Number::from(entry.count)));
+        }
+        keyed_rows.push((sort_key, Value::Object(group_key)));
+    }
+    keyed_rows.sort_by(|left, right| left.0.cmp(&right.0));
+    let rows = keyed_rows
+        .into_iter()
+        .take(limit)
+        .map(|(_, row)| row)
+        .collect::<Vec<_>>();
+    with_metrics(json!({ "aggregation_groups": rows }), namespace)
+}
+
+fn count_document_group<'a>(
+    document: &'a Document,
+    attribute: &str,
+    groups: &mut HashMap<BorrowedScalarKey<'a>, (Value, usize)>,
+) -> bool {
+    let (key, value) = match document_attr(document, attribute) {
+        Some(value) => {
+            let Some(key) = borrowed_scalar_key(value) else {
+                return false;
+            };
+            (key, value.clone())
+        }
+        None => (BorrowedScalarKey::Null, Value::Null),
+    };
+    let entry = groups.entry(key).or_insert_with(|| (value, 0));
+    entry.1 += 1;
+    true
 }
 
 fn query_grouped_aggregations(
