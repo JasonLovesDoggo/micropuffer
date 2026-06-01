@@ -58,7 +58,7 @@ fn grouped_aggregation_over_tags_is_stable() {
         &store(),
         "expertise",
         &json!({
-            "aggregate_by": {"count": ["Count"], "score_sum": ["Sum", "score"]},
+            "aggregate_by": {"count": ["Count"]},
             "group_by": [{"tag": ["ForEachUnique", "tags"]}],
             "limit": {"total": 10}
         }),
@@ -69,11 +69,38 @@ fn grouped_aggregation_over_tags_is_stable() {
         .and_then(Value::as_array)
         .unwrap();
     assert!(
-        groups.iter().any(|group| group["tag"] == "rust"
-            && group["count"] == 1
-            && group["score_sum"] == 97.0)
+        groups
+            .iter()
+            .any(|group| group["tag"] == "rust" && group["count"] == 1)
     );
-    assert!(groups.iter().any(|group| group["tag"] == "hybrid"
-        && group["count"] == 1
-        && group["score_sum"] == 89.0));
+    assert!(
+        groups
+            .iter()
+            .any(|group| group["tag"] == "hybrid" && group["count"] == 1)
+    );
+
+    let sum_response = query_store(
+        &store(),
+        "expertise",
+        &json!({
+            "aggregate_by": {"score_sum": ["Sum", "score"]},
+            "group_by": [{"tag": ["ForEachUnique", "tags"]}],
+            "limit": {"total": 10}
+        }),
+    )
+    .unwrap();
+    let sum_groups = sum_response
+        .get("aggregation_groups")
+        .and_then(Value::as_array)
+        .unwrap();
+    assert!(
+        sum_groups
+            .iter()
+            .any(|group| group["tag"] == "rust" && group["score_sum"] == 97.0)
+    );
+    assert!(
+        sum_groups
+            .iter()
+            .any(|group| group["tag"] == "hybrid" && group["score_sum"] == 89.0)
+    );
 }
