@@ -1,7 +1,7 @@
 use crate::core::{
     DistanceMetric, Document, Micropuffer, MiniStore, Namespace, PATCH_BY_FILTER_LIMIT,
-    default_created_at, default_encryption, namespace_metadata, parse_fts_config, query_namespace,
-    query_store, tokenize, write_store,
+    ScalarEqKey, default_created_at, default_encryption, id_key, namespace_metadata,
+    parse_fts_config, query_namespace, query_store, tokenize, write_store,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Map, Number, Value, json};
@@ -466,6 +466,64 @@ fn order_by_multiple_attributes_uses_stable_tie_breaks() {
         vec![json!(1), json!(3), json!(2)]
     );
     assert!(rows(&response)[0].get("$dist").is_none());
+}
+
+#[test]
+fn indexed_eq_filter_uses_scalar_postings() {
+    let namespace = namespace();
+    let response = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["id", "asc"],
+            "filters": ["tenant_id", "Eq", "alpha"],
+            "limit": 10
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&response)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(1), json!(3)]
+    );
+    assert!(
+        namespace
+            .query_indexes
+            .guard()
+            .equality
+            .contains_key("tenant_id")
+    );
+}
+
+#[test]
+fn indexed_order_by_preserves_multi_attribute_and_stable_id_order() {
+    let namespace: Namespace = serde_json::from_value(json!({
+        "name": "ordered",
+        "documents": [
+            {"id": "z", "tenant": "a", "score": 1},
+            {"id": "b", "tenant": "a", "score": 2},
+            {"id": "a", "tenant": "a", "score": 1},
+            {"id": "c", "tenant": "b", "score": 9}
+        ]
+    }))
+    .unwrap();
+    let response = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": [["tenant", "asc"], ["score", "desc"]],
+            "limit": 10
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&response)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("b"), json!("a"), json!("z"), json!("c")]
+    );
+    assert_eq!(namespace.query_indexes.guard().order.len(), 1);
 }
 
 #[test]
@@ -1085,6 +1143,428 @@ fn column_writes_conditions_ref_new_and_by_filter_mutations_work() {
 }
 
 #[test]
+fn attribute_indexes_are_incrementally_maintained_after_upsert_patch_and_delete() {
+    let mut store = MiniStore {
+        namespaces: vec![
+            serde_json::from_value(json!({
+                "name": "indexed-writes",
+                "documents": [
+                    {"id": 1, "group": "keep", "score": 1},
+                    {"id": 2, "group": "skip", "score": 2},
+                    {"id": 3, "group": "keep", "score": 3}
+                ]
+            }))
+            .unwrap(),
+        ],
+    };
+    let first = query_store(
+        &store,
+        "indexed-writes",
+        &json!({
+            "rank_by": ["score", "asc"],
+            "filters": ["group", "Eq", "keep"],
+            "limit": 10
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&first)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(1), json!(3)]
+    );
+    let namespace = store.namespace("indexed-writes").unwrap();
+    assert_eq!(namespace.query_indexes.guard().equality.len(), 1);
+    assert_eq!(namespace.query_indexes.guard().order.len(), 1);
+
+    write_store(
+        &mut store,
+        "indexed-writes",
+        &json!({
+            "patch_rows": [
+                {"id": 2, "group": "keep", "score": 0}
+            ]
+        }),
+    )
+    .unwrap();
+    let patched = query_store(
+        &store,
+        "indexed-writes",
+        &json!({
+            "rank_by": ["score", "asc"],
+            "filters": ["group", "Eq", "keep"],
+            "limit": 10
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&patched)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(2), json!(1), json!(3)]
+    );
+    let namespace = store.namespace("indexed-writes").unwrap();
+    assert_eq!(namespace.query_indexes.guard().equality.len(), 1);
+    assert_eq!(namespace.query_indexes.guard().order.len(), 1);
+
+    write_store(
+        &mut store,
+        "indexed-writes",
+        &json!({
+            "upsert_rows": [
+                {"id": 3, "group": "skip", "score": 9}
+            ]
+        }),
+    )
+    .unwrap();
+    let replaced = query_store(
+        &store,
+        "indexed-writes",
+        &json!({
+            "rank_by": ["score", "asc"],
+            "filters": ["group", "Eq", "keep"],
+            "limit": 10
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&replaced)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(2), json!(1)]
+    );
+    let namespace = store.namespace("indexed-writes").unwrap();
+    assert_eq!(namespace.query_indexes.guard().equality.len(), 1);
+    assert_eq!(namespace.query_indexes.guard().order.len(), 1);
+
+    write_store(&mut store, "indexed-writes", &json!({"deletes": [1]})).unwrap();
+    let deleted = query_store(
+        &store,
+        "indexed-writes",
+        &json!({
+            "rank_by": ["score", "asc"],
+            "filters": ["group", "Eq", "keep"],
+            "limit": 10
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&deleted)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(2)]
+    );
+    let namespace = store.namespace("indexed-writes").unwrap();
+    assert_eq!(namespace.query_indexes.guard().equality.len(), 1);
+    assert_eq!(namespace.query_indexes.guard().order.len(), 1);
+
+    write_store(
+        &mut store,
+        "indexed-writes",
+        &json!({
+            "upsert_rows": [
+                {"id": 4, "group": "keep", "score": -1}
+            ]
+        }),
+    )
+    .unwrap();
+    let upserted = query_store(
+        &store,
+        "indexed-writes",
+        &json!({
+            "rank_by": ["score", "asc"],
+            "filters": ["group", "Eq", "keep"],
+            "limit": 10
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&upserted)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(4), json!(2)]
+    );
+    let namespace = store.namespace("indexed-writes").unwrap();
+    assert_eq!(namespace.query_indexes.guard().equality.len(), 1);
+    assert_eq!(namespace.query_indexes.guard().order.len(), 1);
+}
+
+#[test]
+fn indexed_candidates_are_rechecked_by_filter_evaluator() {
+    let namespace: Namespace = serde_json::from_value(json!({
+        "name": "source-of-truth",
+        "documents": [
+            {"id": 1, "group": "keep", "score": 1},
+            {"id": 2, "group": "skip", "score": 2}
+        ]
+    }))
+    .unwrap();
+    let first = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["score", "asc"],
+            "filters": ["group", "Eq", "keep"],
+            "limit": 10
+        }),
+    )
+    .unwrap();
+    assert_eq!(rows(&first)[0]["id"], 1);
+
+    namespace
+        .query_indexes
+        .guard()
+        .equality
+        .get_mut("group")
+        .unwrap()
+        .postings
+        .entry(ScalarEqKey::String("keep".to_string()))
+        .or_default()
+        .insert(id_key(&json!(2)));
+
+    let poisoned = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["score", "asc"],
+            "filters": ["group", "Eq", "keep"],
+            "limit": 10
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&poisoned)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(1)]
+    );
+}
+
+#[test]
+fn empty_and_filter_falls_back_to_full_evaluator() {
+    let namespace: Namespace = serde_json::from_value(json!({
+        "name": "empty-and",
+        "documents": [
+            {"id": 1, "score": 3},
+            {"id": 2, "score": 1},
+            {"id": 3, "score": 2}
+        ]
+    }))
+    .unwrap();
+    let response = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["score", "asc"],
+            "filters": ["And", []],
+            "limit": 10
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&response)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(2), json!(3), json!(1)]
+    );
+}
+
+#[test]
+fn indexed_order_and_filters_track_by_filter_writes_and_edge_values() {
+    let mut store = MiniStore {
+        namespaces: vec![
+            serde_json::from_value(json!({
+                "name": "edge-indexes",
+                "documents": [
+                    {"id": 1, "group": "alpha", "score": 10, "tie": "b"},
+                    {"id": 2, "group": "beta", "score": 2.0, "tie": "a", "optional": null},
+                    {"id": "3", "group": "alpha", "score": 2, "tie": "c"},
+                    {"id": "4", "group": "beta", "score": 4, "tie": "d", "optional": "present"}
+                ]
+            }))
+            .unwrap(),
+        ],
+    };
+    let first = query_store(
+        &store,
+        "edge-indexes",
+        &json!({
+            "rank_by": [["score", "asc"], ["tie", "asc"]],
+            "filters": ["group", "Eq", "beta"],
+            "limit": 10,
+            "include_attributes": ["score", "tie", "optional"]
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&first)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(2), json!("4")]
+    );
+
+    write_store(
+        &mut store,
+        "edge-indexes",
+        &json!({
+            "patch_by_filter": {
+                "filters": ["optional", "Eq", null],
+                "patch": {"group": "patched", "score": 1, "tie": "z"}
+            }
+        }),
+    )
+    .unwrap();
+    let patched = query_store(
+        &store,
+        "edge-indexes",
+        &json!({
+            "rank_by": [["score", "asc"], ["tie", "asc"]],
+            "filters": ["group", "Eq", "patched"],
+            "limit": 10
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&patched)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("3"), json!(1), json!(2)]
+    );
+
+    write_store(
+        &mut store,
+        "edge-indexes",
+        &json!({"delete_by_filter": ["score", "Eq", 1.0]}),
+    )
+    .unwrap();
+    let remaining = query_store(
+        &store,
+        "edge-indexes",
+        &json!({
+            "rank_by": [["score", "asc"], ["tie", "asc"]],
+            "filters": ["group", "Eq", "patched"],
+            "limit": 10
+        }),
+    )
+    .unwrap();
+    assert!(rows(&remaining).is_empty());
+    let namespace = store.namespace("edge-indexes").unwrap();
+    assert_eq!(namespace.query_indexes.guard().equality.len(), 1);
+    assert_eq!(namespace.query_indexes.guard().order.len(), 1);
+}
+
+#[test]
+fn copy_and_branch_start_with_empty_independent_query_indexes() {
+    let mut clone = Micropuffer::from_store(MiniStore {
+        namespaces: vec![namespace()],
+    });
+    clone
+        .query(
+            "demo",
+            &json!({
+                "rank_by": [["tenant_id", "asc"], ["score", "desc"]],
+                "filters": ["tenant_id", "Eq", "alpha"],
+                "limit": 10
+            }),
+        )
+        .unwrap();
+    assert!(
+        !clone
+            .store()
+            .namespace("demo")
+            .unwrap()
+            .query_indexes
+            .guard()
+            .is_empty()
+    );
+
+    clone
+        .write("demo-copy-indexes", &json!({"copy_from_namespace": "demo"}))
+        .unwrap();
+    clone
+        .write(
+            "demo-branch-indexes",
+            &json!({"branch_from_namespace": "demo"}),
+        )
+        .unwrap();
+
+    assert!(
+        clone
+            .store()
+            .namespace("demo-copy-indexes")
+            .unwrap()
+            .query_indexes
+            .guard()
+            .is_empty()
+    );
+    assert!(
+        clone
+            .store()
+            .namespace("demo-branch-indexes")
+            .unwrap()
+            .query_indexes
+            .guard()
+            .is_empty()
+    );
+
+    let copied = clone
+        .query(
+            "demo-copy-indexes",
+            &json!({
+                "rank_by": [["tenant_id", "asc"], ["score", "desc"]],
+                "filters": ["tenant_id", "Eq", "alpha"],
+                "limit": 10
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        rows(&copied)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(1), json!(3)]
+    );
+}
+
+#[test]
+fn complex_filters_fall_back_to_full_evaluator() {
+    let namespace: Namespace = serde_json::from_value(json!({
+        "name": "fallback",
+        "documents": [
+            {"id": 1, "tenant_id": "beta", "title": "dashboard"},
+            {"id": 2, "tenant_id": "alpha", "title": "hybrid search"},
+            {"id": 3, "tenant_id": "alpha", "title": "plain search"}
+        ]
+    }))
+    .unwrap();
+    let response = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["id", "asc"],
+            "filters": ["Or", [
+                ["tenant_id", "Eq", "beta"],
+                ["title", "Fuzzy", "hybryd"]
+            ]],
+            "limit": 10
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&response)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(1), json!(2)]
+    );
+}
+
+#[test]
 fn writes_enforce_schema_types_and_vector_invariants() {
     let mut clone = Micropuffer::new();
     clone
@@ -1376,6 +1856,7 @@ fn patch_by_filter_respects_partial_limit_and_rows_remaining() {
             pinning: None,
             branching_parent: None,
             documents,
+            query_indexes: Default::default(),
             logical_bytes_cache: Default::default(),
             fts_index_cache: Default::default(),
         }],
