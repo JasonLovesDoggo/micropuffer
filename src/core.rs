@@ -5,6 +5,7 @@ use deunicode::deunicode;
 use globset::GlobBuilder;
 use regex::Regex;
 use rust_stemmers::{Algorithm, Stemmer};
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value, json};
 use std::cmp::Ordering;
@@ -212,11 +213,105 @@ impl DistanceMetric {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone)]
 pub struct Document {
     pub id: Value,
-    #[serde(flatten)]
     pub attributes: Map<String, Value>,
+    pub typed: TypedDocumentFields,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TypedDocumentFields {
+    vector: Option<Vec<f64>>,
+}
+
+impl Document {
+    pub fn new(id: Value, mut attributes: Map<String, Value>) -> Self {
+        let typed = TypedDocumentFields::from_attributes(&attributes);
+        if typed.vector.is_some() {
+            attributes.remove("vector");
+        }
+        Self {
+            id,
+            attributes,
+            typed,
+        }
+    }
+
+    fn set_attribute(&mut self, key: String, value: Value) {
+        self.typed.set_attribute(&key, &value);
+        if key == "vector" && self.typed.vector.is_some() {
+            self.attributes.remove(&key);
+        } else {
+            self.attributes.insert(key, value);
+        }
+    }
+}
+
+impl Serialize for Document {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut len = self.attributes.len() + 1;
+        if self.typed.vector.is_some() && !self.attributes.contains_key("vector") {
+            len += 1;
+        }
+        let mut map = serializer.serialize_map(Some(len))?;
+        map.serialize_entry("id", &self.id)?;
+        if let Some(vector) = &self.typed.vector
+            && !self.attributes.contains_key("vector")
+        {
+            map.serialize_entry("vector", vector)?;
+        }
+        for (key, value) in &self.attributes {
+            map.serialize_entry(key, value)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Document {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct DocumentWire {
+            id: Value,
+            #[serde(flatten)]
+            attributes: Map<String, Value>,
+        }
+
+        let wire = DocumentWire::deserialize(deserializer)?;
+        Ok(Document::new(wire.id, wire.attributes))
+    }
+}
+
+impl TypedDocumentFields {
+    fn from_attributes(attributes: &Map<String, Value>) -> Self {
+        let mut typed = Self::default();
+        for (key, value) in attributes {
+            typed.set_attribute(key, value);
+        }
+        typed
+    }
+
+    fn set_attribute(&mut self, key: &str, value: &Value) {
+        if key == "vector" {
+            self.vector = None;
+            if let Some(vector) = dense_vector_from_value(value) {
+                self.vector = Some(vector);
+            }
+        }
+    }
+
+    fn dense_vector(&self, key: &str) -> Option<&[f64]> {
+        if key == "vector" {
+            return self.vector.as_deref();
+        }
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,6 +401,9 @@ enum PreparedRankExpr<'a> {
     },
     DenseDistance {
         attribute: &'a str,
+        query: PreparedDenseQuery,
+    },
+    DenseDistanceVector {
         query: PreparedDenseQuery,
     },
     SparseDotProduct {
@@ -587,19 +685,19 @@ pub fn recall_namespace(namespace: &Namespace, request: &Value) -> Result<Value,
                 })
                 .unwrap_or(true)
         })
-        .filter(|document| document.attributes.get("vector").is_some())
+        .filter(|document| {
+            document.typed.vector.is_some() || document.attributes.get("vector").is_some()
+        })
         .collect::<Vec<_>>();
     let sample = candidates.iter().take(num).copied().collect::<Vec<_>>();
     let mut ground_truth = Vec::new();
     for query_document in &sample {
-        let query_vector = query_document
-            .attributes
-            .get("vector")
+        let query_vector = document_vector_value(query_document)
             .ok_or_else(|| QueryError::new("recall query document is missing vector."))?;
         let mut neighbors = candidates
             .iter()
             .map(|document| {
-                dense_distance(document, "vector", query_vector, namespace.distance_metric)
+                dense_distance(document, "vector", &query_vector, namespace.distance_metric)
                     .map(|score| (*document, score))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -634,10 +732,19 @@ fn project_recall_neighbor(document: &Document, score: f64) -> Value {
     let mut row = Map::new();
     row.insert("$dist".to_string(), number_value(score));
     row.insert("id".to_string(), document.id.clone());
-    if let Some(vector) = document.attributes.get("vector") {
-        row.insert("vector".to_string(), vector.clone());
+    if let Some(vector) = document_vector_value(document) {
+        row.insert("vector".to_string(), vector);
     }
     Value::Object(row)
+}
+
+fn document_vector_value(document: &Document) -> Option<Value> {
+    document
+        .typed
+        .vector
+        .as_ref()
+        .map(|vector| Value::Array(vector.iter().copied().map(number_value).collect()))
+        .or_else(|| document.attributes.get("vector").cloned())
 }
 
 pub fn explain_query(namespace: &Namespace, request: &Value) -> Result<Value, QueryError> {
@@ -969,6 +1076,7 @@ fn parse_pinning(value: &Value) -> Result<Option<Value>, QueryError> {
 fn inferred_schema(namespace: &Namespace) -> Map<String, Value> {
     let mut schema = namespace.schema.clone();
     for document in &namespace.documents {
+        infer_typed_document_schema(document, &mut schema);
         for (attribute, value) in &document.attributes {
             if schema.contains_key(attribute) {
                 continue;
@@ -1097,6 +1205,7 @@ fn merge_schema(namespace: &mut Namespace, schema: &Map<String, Value>) -> Resul
 fn refresh_inferred_schema(namespace: &mut Namespace) -> Result<(), QueryError> {
     let mut schema = namespace.schema.clone();
     for document in &namespace.documents {
+        infer_typed_document_schema(document, &mut schema);
         for (attribute, value) in &document.attributes {
             if schema.contains_key(attribute) {
                 continue;
@@ -1107,6 +1216,17 @@ fn refresh_inferred_schema(namespace: &mut Namespace) -> Result<(), QueryError> 
     validate_vector_column_count(&schema)?;
     namespace.schema = schema;
     Ok(())
+}
+
+fn infer_typed_document_schema(document: &Document, schema: &mut Map<String, Value>) {
+    if !schema.contains_key("vector")
+        && let Some(vector) = &document.typed.vector
+    {
+        schema.insert(
+            "vector".to_string(),
+            json!(format!("[{}]f32", vector.len())),
+        );
+    }
 }
 
 fn validate_write_rows_against_schema(
@@ -2049,18 +2169,12 @@ fn upsert_document(
         {
             return Ok(false);
         }
-        namespace.documents[index] = Document {
-            id: row.id,
-            attributes: row.attributes,
-        };
+        namespace.documents[index] = Document::new(row.id, row.attributes);
     } else {
         let index = namespace.documents.len();
         let id = row.id;
         id_index.insert_new(&id, index);
-        namespace.documents.push(Document {
-            id,
-            attributes: row.attributes,
-        });
+        namespace.documents.push(Document::new(id, row.attributes));
     }
     Ok(true)
 }
@@ -2082,7 +2196,7 @@ fn patch_document(
         return Ok(false);
     }
     for (key, value) in row.attributes {
-        namespace.documents[index].attributes.insert(key, value);
+        namespace.documents[index].set_attribute(key, value);
     }
     Ok(true)
 }
@@ -2215,7 +2329,7 @@ fn patch_by_filter(
     for (index, document) in namespace.documents.iter_mut().enumerate() {
         if selected.contains(&index) {
             for (key, value) in patch {
-                document.attributes.insert(key.clone(), value.clone());
+                document.set_attribute(key.clone(), value.clone());
             }
             patched.push(document.id.clone());
         }
@@ -2582,10 +2696,15 @@ fn prepare_rank_expr<'a>(
             "ANN" | "kNN" => {
                 let values = numeric_array(&array[2], "query vector")?;
                 let norm = vector_norm(&values);
-                Ok(PreparedRankExpr::DenseDistance {
-                    attribute: attr,
-                    query: PreparedDenseQuery { values, norm },
-                })
+                let query = PreparedDenseQuery { values, norm };
+                if attr == "vector" {
+                    Ok(PreparedRankExpr::DenseDistanceVector { query })
+                } else {
+                    Ok(PreparedRankExpr::DenseDistance {
+                        attribute: attr,
+                        query,
+                    })
+                }
             }
             "SparseKNN" => Ok(PreparedRankExpr::SparseDotProduct {
                 attribute: attr,
@@ -2982,6 +3101,9 @@ fn eval_prepared_rank_expr(
         PreparedRankExpr::DenseDistance { attribute, query } => {
             dense_distance_to_query(document, attribute, query, distance_metric)
         }
+        PreparedRankExpr::DenseDistanceVector { query } => {
+            vector_distance_to_query(document, query, distance_metric)
+        }
         PreparedRankExpr::SparseDotProduct { attribute, query } => {
             sparse_dot_product_with_query(document, attribute, query)
         }
@@ -3005,42 +3127,42 @@ fn dense_distance(
     query: &Value,
     distance_metric: DistanceMetric,
 ) -> Result<f64, QueryError> {
+    let right = numeric_array(query, "query vector")?;
+    let prepared_query = PreparedDenseQuery {
+        norm: vector_norm(&right),
+        values: right,
+    };
+    if let Some(left) = document.typed.dense_vector(attr) {
+        if left.len() != prepared_query.values.len() {
+            return Err(QueryError::new(format!(
+                "Vector dimension mismatch for '{attr}': document has {}, query has {}.",
+                left.len(),
+                prepared_query.values.len()
+            )));
+        }
+        return Ok(dense_distance_values(
+            left,
+            &prepared_query,
+            distance_metric,
+        ));
+    }
     let left = document
         .attributes
         .get(attr)
         .ok_or_else(|| QueryError::new(format!("Vector attribute '{attr}' is missing.")))?;
     let left = numeric_array(left, attr)?;
-    let right = numeric_array(query, "query vector")?;
-    if left.len() != right.len() {
+    if left.len() != prepared_query.values.len() {
         return Err(QueryError::new(format!(
             "Vector dimension mismatch for '{attr}': document has {}, query has {}.",
             left.len(),
-            right.len()
+            prepared_query.values.len()
         )));
     }
-    match distance_metric {
-        DistanceMetric::EuclideanSquared => Ok(left
-            .iter()
-            .zip(right.iter())
-            .map(|(doc_value, query_value)| {
-                let delta = doc_value - query_value;
-                delta * delta
-            })
-            .sum()),
-        DistanceMetric::CosineDistance => {
-            let dot = left
-                .iter()
-                .zip(right.iter())
-                .map(|(doc_value, query_value)| doc_value * query_value)
-                .sum::<f64>();
-            let left_norm = left.iter().map(|value| value * value).sum::<f64>().sqrt();
-            let right_norm = right.iter().map(|value| value * value).sum::<f64>().sqrt();
-            if left_norm == 0.0 || right_norm == 0.0 {
-                return Ok(1.0);
-            }
-            Ok(1.0 - dot / (left_norm * right_norm))
-        }
-    }
+    Ok(dense_distance_values(
+        &left,
+        &prepared_query,
+        distance_metric,
+    ))
 }
 
 fn dense_distance_to_query(
@@ -3049,6 +3171,16 @@ fn dense_distance_to_query(
     query: &PreparedDenseQuery,
     distance_metric: DistanceMetric,
 ) -> Result<f64, QueryError> {
+    if let Some(values) = document.typed.dense_vector(attr) {
+        if values.len() != query.values.len() {
+            return Err(QueryError::new(format!(
+                "Vector dimension mismatch for '{attr}': document has {}, query has {}.",
+                values.len(),
+                query.values.len()
+            )));
+        }
+        return Ok(dense_distance_values(values, query, distance_metric));
+    }
     let left = document
         .attributes
         .get(attr)
@@ -3088,11 +3220,11 @@ fn dense_distance_to_query(
             .ok_or_else(|| QueryError::new(format!("{attr}[{index}] must be numeric.")))?;
         match distance_metric {
             DistanceMetric::EuclideanSquared => {
-                let delta = doc_value - query_value;
+                let delta = doc_value - *query_value;
                 distance += delta * delta;
             }
             DistanceMetric::CosineDistance => {
-                dot += doc_value * query_value;
+                dot += doc_value * *query_value;
                 norm += doc_value * doc_value;
             }
         }
@@ -3105,6 +3237,56 @@ fn dense_distance_to_query(
                 return Ok(1.0);
             }
             Ok(1.0 - dot / (norm * query.norm))
+        }
+    }
+}
+
+fn vector_distance_to_query(
+    document: &Document,
+    query: &PreparedDenseQuery,
+    distance_metric: DistanceMetric,
+) -> Result<f64, QueryError> {
+    if let Some(values) = document.typed.vector.as_deref() {
+        if values.len() != query.values.len() {
+            return Err(QueryError::new(format!(
+                "Vector dimension mismatch for 'vector': document has {}, query has {}.",
+                values.len(),
+                query.values.len()
+            )));
+        }
+        return Ok(dense_distance_values(values, query, distance_metric));
+    }
+    dense_distance_to_query(document, "vector", query, distance_metric)
+}
+
+fn dense_distance_values(
+    values: &[f64],
+    query: &PreparedDenseQuery,
+    distance_metric: DistanceMetric,
+) -> f64 {
+    let mut dot = 0.0;
+    let mut norm = 0.0;
+    let mut distance = 0.0;
+    for (doc_value, query_value) in values.iter().zip(query.values.iter()) {
+        match distance_metric {
+            DistanceMetric::EuclideanSquared => {
+                let delta = doc_value - query_value;
+                distance += delta * delta;
+            }
+            DistanceMetric::CosineDistance => {
+                dot += doc_value * query_value;
+                norm += doc_value * doc_value;
+            }
+        }
+    }
+    match distance_metric {
+        DistanceMetric::EuclideanSquared => distance,
+        DistanceMetric::CosineDistance => {
+            let norm = norm.sqrt();
+            if norm == 0.0 || query.norm == 0.0 {
+                return 1.0;
+            }
+            1.0 - dot / (norm * query.norm)
         }
     }
 }
@@ -3663,6 +3845,12 @@ fn project_document(
     match (include, exclude) {
         (None, None) => {}
         (Some(Value::Bool(true)), None) => {
+            if let Some(vector) = document_vector_value(document) {
+                row.insert(
+                    "vector".to_string(),
+                    maybe_encode_vector(&vector, vector_encoding)?,
+                );
+            }
             for (key, value) in &document.attributes {
                 row.insert(key.clone(), maybe_encode_vector(value, vector_encoding)?);
             }
@@ -3670,7 +3858,14 @@ fn project_document(
         (Some(Value::Array(attributes)), None) => {
             for attribute in attributes {
                 let name = as_string(attribute, "include_attributes item")?;
-                if let Some(value) = document.attributes.get(name) {
+                if name == "vector"
+                    && let Some(vector) = document_vector_value(document)
+                {
+                    row.insert(
+                        name.to_string(),
+                        maybe_encode_vector(&vector, vector_encoding)?,
+                    );
+                } else if let Some(value) = document.attributes.get(name) {
                     row.insert(
                         name.to_string(),
                         maybe_encode_vector(value, vector_encoding)?,
@@ -3685,6 +3880,14 @@ fn project_document(
                     as_string(attribute, "exclude_attributes item").map(ToString::to_string)
                 })
                 .collect::<Result<BTreeSet<_>, _>>()?;
+            if !excluded.contains("vector")
+                && let Some(vector) = document_vector_value(document)
+            {
+                row.insert(
+                    "vector".to_string(),
+                    maybe_encode_vector(&vector, vector_encoding)?,
+                );
+            }
             for (key, value) in &document.attributes {
                 if !excluded.contains(key) {
                     row.insert(key.clone(), maybe_encode_vector(value, vector_encoding)?);
@@ -4232,6 +4435,15 @@ fn sparse_map(value: &Value, label: &str) -> Result<HashMap<String, f64>, QueryE
                 })
         })
         .collect()
+}
+
+fn dense_vector_from_value(value: &Value) -> Option<Vec<f64>> {
+    value.as_array().and_then(|items| {
+        if items.is_empty() {
+            return None;
+        }
+        items.iter().map(value_as_f64).collect::<Option<Vec<_>>>()
+    })
 }
 
 fn numeric_array(value: &Value, label: &str) -> Result<Vec<f64>, QueryError> {

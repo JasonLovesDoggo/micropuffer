@@ -548,6 +548,87 @@ fn documents_flatten_unknown_attributes() {
 }
 
 #[test]
+fn document_typed_dense_vectors_are_cached_and_skipped_by_json() {
+    let document: Document = serde_json::from_value(json!({
+        "id": "typed",
+        "vector": [1.0, 2.0, 3.0],
+        "sparse_vector": {"a": 0.5, "b": 1.5},
+        "score": 7
+    }))
+    .unwrap();
+
+    assert_eq!(
+        document.typed.dense_vector("vector").unwrap(),
+        &[1.0, 2.0, 3.0]
+    );
+
+    let serialized = serde_json::to_value(&document).unwrap();
+    assert_eq!(serialized["vector"], json!([1.0, 2.0, 3.0]));
+    assert_eq!(serialized["sparse_vector"], json!({"a": 0.5, "b": 1.5}));
+    assert!(serialized.get("typed").is_none());
+}
+
+#[test]
+fn typed_dense_vectors_refresh_on_upsert_and_imported_stores() {
+    let mut clone = Micropuffer::new();
+    clone
+        .write(
+            "typed-refresh",
+            &json!({
+                "schema": {
+                    "vector": "[2]f32",
+                    "sparse_vector": {
+                        "type": "{}f16",
+                        "sparse_knn": {"distance_metric": "dot_product"}
+                    },
+                    "score": "uint"
+                },
+                "upsert_rows": [
+                    {"id": 1, "vector": [1.0, 0.0], "sparse_vector": {"a": 0.1}, "score": 1}
+                ]
+            }),
+        )
+        .unwrap();
+    clone
+        .write(
+            "typed-refresh",
+            &json!({
+                "upsert_rows": [
+                    {"id": 1, "vector": [0.0, 1.0], "sparse_vector": {"a": 2.0, "b": 3.0}, "score": 9}
+                ]
+            }),
+        )
+        .unwrap();
+
+    let namespace = clone.store().namespace("typed-refresh").unwrap();
+    let document = &namespace.documents[0];
+    assert_eq!(document.typed.dense_vector("vector").unwrap(), &[0.0, 1.0]);
+
+    let serialized = serde_json::to_value(clone.store()).unwrap();
+    let imported: MiniStore = serde_json::from_value(serialized).unwrap();
+    let imported_doc = &imported.namespace("typed-refresh").unwrap().documents[0];
+    assert_eq!(
+        imported_doc
+            .typed
+            .dense_vector("vector")
+            .expect("cached imported vector"),
+        &[0.0, 1.0]
+    );
+    assert_eq!(
+        query_store(
+            &imported,
+            "typed-refresh",
+            &json!({
+                "rank_by": ["vector", "ANN", [0.0, 1.0]],
+                "limit": 1
+            }),
+        )
+        .unwrap()["rows"][0]["id"],
+        1
+    );
+}
+
+#[test]
 fn writes_upsert_patch_delete_and_query_in_memory() {
     let mut store = MiniStore::default();
     write_store(
@@ -789,13 +870,13 @@ fn write_responses_include_requested_zero_counts_and_query_billing() {
 fn patch_by_filter_respects_partial_limit_and_rows_remaining() {
     let mut documents = Vec::with_capacity(PATCH_BY_FILTER_LIMIT + 1);
     for index in 0..=PATCH_BY_FILTER_LIMIT {
-        documents.push(Document {
-            id: Value::Number(Number::from(index as u64)),
-            attributes: Map::from_iter([
+        documents.push(Document::new(
+            Value::Number(Number::from(index as u64)),
+            Map::from_iter([
                 ("group".to_string(), Value::String("all".to_string())),
                 ("patched".to_string(), Value::Bool(false)),
             ]),
-        });
+        ));
     }
     let mut clone = Micropuffer::from_store(MiniStore {
         namespaces: vec![Namespace {
@@ -1322,4 +1403,99 @@ fn write_100k_new_upserts_completes_in_one_batch() {
         store.namespace("bulk-upsert").unwrap().documents.len(),
         100_000
     );
+}
+
+#[test]
+#[ignore = "performance evidence; run explicitly"]
+fn stateful_100k_dense_sparse_query_benchmark() {
+    let row_count = benchmark_env_usize("MICROPUFFER_BENCH_ROWS").unwrap_or(100_000);
+    let dimensions = benchmark_env_usize("MICROPUFFER_BENCH_DIMS").unwrap_or(32);
+    let runs = benchmark_env_usize("MICROPUFFER_BENCH_QUERY_RUNS").unwrap_or(5);
+    let rows = (0..row_count)
+        .map(|index| {
+            json!({
+                "id": index as u64,
+                "vector": benchmark_vector(index, dimensions),
+                "sparse_vector": {
+                    format!("{}", index % 128): ((index % 10) + 1) as f64 / 10.0,
+                    format!("{}", (index * 7) % 128): ((index % 7) + 1) as f64 / 10.0
+                },
+                "category": format!("category_{}", index % 10),
+                "score": index % 1_000
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut clone = Micropuffer::new();
+    let write_started = std::time::Instant::now();
+    clone
+        .write(
+            "stateful-100k",
+            &json!({
+                "schema": {
+                    "vector": format!("[{dimensions}]f32"),
+                    "sparse_vector": {
+                        "type": "{}f16",
+                        "sparse_knn": {"distance_metric": "dot_product"}
+                    },
+                    "category": "string",
+                    "score": "uint"
+                },
+                "upsert_rows": rows
+            }),
+        )
+        .unwrap();
+    let write_elapsed = write_started.elapsed();
+
+    let dense_query = json!({
+        "rank_by": ["vector", "ANN", benchmark_vector(42, dimensions)],
+        "limit": 10,
+        "include_attributes": ["category", "score"]
+    });
+    let sparse_query = json!({
+        "rank_by": ["sparse_vector", "SparseKNN", {"7": 0.7, "12": 0.2}],
+        "limit": 10,
+        "include_attributes": ["category"]
+    });
+    let dense_elapsed = benchmark_query_runs(&clone, "stateful-100k", &dense_query, runs);
+    let sparse_elapsed = benchmark_query_runs(&clone, "stateful-100k", &sparse_query, runs);
+
+    println!(
+        "stateful_100k_dense_sparse_query_benchmark rows={row_count} dimensions={dimensions} runs={runs} write_ms={:.2} dense_total_ms={:.2} dense_mean_ms={:.2} sparse_total_ms={:.2} sparse_mean_ms={:.2}",
+        write_elapsed.as_secs_f64() * 1_000.0,
+        dense_elapsed.as_secs_f64() * 1_000.0,
+        dense_elapsed.as_secs_f64() * 1_000.0 / runs as f64,
+        sparse_elapsed.as_secs_f64() * 1_000.0,
+        sparse_elapsed.as_secs_f64() * 1_000.0 / runs as f64
+    );
+}
+
+fn benchmark_query_runs(
+    clone: &Micropuffer,
+    namespace_name: &str,
+    query: &Value,
+    runs: usize,
+) -> std::time::Duration {
+    let started = std::time::Instant::now();
+    for _ in 0..runs {
+        std::hint::black_box(clone.query(namespace_name, query).unwrap());
+    }
+    started.elapsed()
+}
+
+fn benchmark_env_usize(key: &str) -> Option<usize> {
+    std::env::var(key).ok()?.parse().ok()
+}
+
+fn benchmark_vector(seed: usize, dimensions: usize) -> Vec<f64> {
+    let mut values = (0..dimensions)
+        .map(|index| {
+            let raw = ((seed * 31 + index * 17) % 1_000) as f64 / 1_000.0;
+            raw * 2.0 - 1.0
+        })
+        .collect::<Vec<_>>();
+    let norm = values.iter().map(|value| value * value).sum::<f64>().sqrt();
+    for value in &mut values {
+        *value /= norm;
+    }
+    values
 }
