@@ -52,6 +52,7 @@ Sources checked:
 - `GET /v1/namespaces/:namespace/hint_cache_warm`, status parity only
 - exact status/body parity for include/exclude projection validation
 - exact status/body parity for selected Serde-style query validation failures
+- exact status/body parity for missing-namespace query failures
 
 ## Covered by local Rust tests only
 
