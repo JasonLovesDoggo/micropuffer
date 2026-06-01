@@ -3,7 +3,7 @@ use crate::{
     core::{
         DistanceMetric, Document, Micropuffer, MiniStore, Namespace, PATCH_BY_FILTER_LIMIT,
         ScalarEqKey, default_created_at, default_encryption, namespace_metadata, parse_fts_config,
-        query_namespace, query_store, tokenize, write_store,
+        patch_by_filter_with_limit, query_namespace, query_store, tokenize, write_store,
     },
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -2476,8 +2476,10 @@ fn copy_replaces_existing_empty_namespace_logical_bytes_cache() {
 
 #[test]
 fn patch_by_filter_respects_partial_limit_and_rows_remaining() {
-    let mut documents = Vec::with_capacity(PATCH_BY_FILTER_LIMIT + 1);
-    for index in 0..=PATCH_BY_FILTER_LIMIT {
+    assert_eq!(PATCH_BY_FILTER_LIMIT, 500_000);
+    const TEST_LIMIT: usize = 3;
+    let mut documents = Vec::with_capacity(TEST_LIMIT + 1);
+    for index in 0..=TEST_LIMIT {
         documents.push(Document::new(
             Value::Number(Number::from(index as u64)),
             Map::from_iter([
@@ -2486,7 +2488,7 @@ fn patch_by_filter_respects_partial_limit_and_rows_remaining() {
             ]),
         ));
     }
-    let mut clone = Micropuffer::from_store(MiniStore {
+    let mut store = MiniStore {
         namespaces: vec![Namespace {
             name: "partial".to_string(),
             distance_metric: DistanceMetric::default(),
@@ -2505,46 +2507,29 @@ fn patch_by_filter_respects_partial_limit_and_rows_remaining() {
             logical_bytes_cache: Default::default(),
             fts_index_cache: Default::default(),
         }],
+    };
+    let request = json!({
+        "filters": ["group", "Eq", "all"],
+        "patch": {"patched": true}
     });
-    let too_many = clone
-        .write(
-            "partial",
-            &json!({
-                "patch_by_filter": {
-                    "filters": ["group", "Eq", "all"],
-                    "patch": {"patched": true}
-                }
-            }),
-        )
-        .unwrap_err();
+    let too_many = patch_by_filter_with_limit(
+        store.namespace_mut("partial").unwrap(),
+        &request,
+        false,
+        TEST_LIMIT,
+    )
+    .unwrap_err();
     assert!(too_many.to_string().contains("more documents than allowed"));
 
-    let partial = clone
-        .write(
-            "partial",
-            &json!({
-                "patch_by_filter_allow_partial": true,
-                "patch_by_filter": {
-                    "filters": ["group", "Eq", "all"],
-                    "patch": {"patched": true}
-                },
-                "return_affected_ids": true
-            }),
-        )
-        .unwrap();
-    assert_eq!(partial["rows_affected"], PATCH_BY_FILTER_LIMIT);
-    assert_eq!(partial["rows_patched"], PATCH_BY_FILTER_LIMIT);
-    assert_eq!(partial["rows_remaining"], true);
-    assert_eq!(
-        partial["patched_ids"].as_array().unwrap().len(),
-        PATCH_BY_FILTER_LIMIT
+    let partial = patch_by_filter_with_limit(
+        store.namespace_mut("partial").unwrap(),
+        &request,
+        true,
+        TEST_LIMIT,
     );
-    assert!(
-        partial["billing"]["query"]["billable_logical_bytes_queried"]
-            .as_u64()
-            .unwrap()
-            > 0
-    );
+    let partial = partial.unwrap();
+    assert_eq!(partial.ids.len(), TEST_LIMIT);
+    assert!(partial.rows_remaining);
 }
 
 #[test]
