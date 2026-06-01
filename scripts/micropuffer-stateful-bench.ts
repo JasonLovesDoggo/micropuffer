@@ -162,6 +162,21 @@ function queryCases(): QueryCase[] {
         limit: 100,
         include_attributes: ["category", "score"]
       }
+    },
+    {
+      operation: "aggregate_count",
+      request: {
+        aggregate_by: { count: ["Count"] },
+        filters: ["public", "Eq", 1]
+      }
+    },
+    {
+      operation: "group_count_top10",
+      request: {
+        aggregate_by: { count: ["Count"] },
+        group_by: ["category"],
+        top_k: 10
+      }
     }
   ];
 }
