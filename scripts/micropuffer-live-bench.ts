@@ -7,12 +7,10 @@ import {
   integerEnv,
   loadEnv,
   parseJsonObject,
-  parseMutationResult,
   requiredEnv
 } from "./test-utils.ts";
 import {
-  micropuffer_query,
-  micropuffer_write
+  Micropuffer
 } from "micropuffer";
 
 type BenchSample = {
@@ -55,7 +53,7 @@ const namespaceName = envOrDefault(
 );
 const keepNamespace = envOrDefault("MICROPUFFER_BENCH_KEEP_NAMESPACE", "0") === "1";
 
-let micropufferStore: JsonObject = { namespaces: [] };
+const micropuffer = new Micropuffer();
 
 await main();
 
@@ -107,15 +105,7 @@ async function writeLiveRows(rows: JsonObject[]): Promise<void> {
 }
 
 function writeMicropufferRows(rows: JsonObject[]): void {
-  const result = parseMutationResult(
-    micropuffer_write(
-      JSON.stringify(micropufferStore),
-      namespaceName,
-      JSON.stringify(writeRequest(rows, true))
-    ),
-    "micropuffer write response"
-  );
-  micropufferStore = result.store;
+  micropuffer.write(namespaceName, JSON.stringify(writeRequest(rows, true)));
 }
 
 function writeRequest(upsertRows: JsonObject[], includeSchema: boolean): JsonObject {
@@ -236,7 +226,7 @@ async function liveQuery(request: JsonObject): Promise<JsonObject> {
 
 function micropufferQuery(request: JsonObject): JsonObject {
   return parseJsonObject(
-    micropuffer_query(JSON.stringify(micropufferStore), namespaceName, JSON.stringify(request)),
+    micropuffer.query(namespaceName, JSON.stringify(request)),
     "micropuffer query response"
   );
 }

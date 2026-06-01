@@ -11,7 +11,12 @@ pnpm add micropuffer
 ```
 
 ```ts
-import { micropuffer_query, micropuffer_write } from "micropuffer";
+import { Micropuffer } from "micropuffer";
+
+const engine = new Micropuffer();
+engine.write("local", JSON.stringify({ upsert_rows: [{ id: 1, vector: [1, 0] }] }));
+const response = engine.query("local", JSON.stringify({ rank_by: ["id", "asc"], limit: 10 }));
+const storeJson = engine.exportStore();
 ```
 
 The npm package ships generated `wasm-bindgen` output from `pkg/`. Generated artifacts are built during `prepack` and in the publish workflow, but are not committed to git.
@@ -29,6 +34,7 @@ pnpm build:wasm
 cargo test
 cargo clippy --all --benches --tests --examples --all-features
 pnpm exec tsc --noEmit
+pnpm test:wasm
 pnpm test:live
 pnpm test:fuzz
 ```
@@ -62,6 +68,12 @@ MICROPUFFER_BENCH_KEEP_NAMESPACE=1
 ```
 
 The benchmark covers row writes, ANN, BM25, sparse vector search, filtered order-by, count aggregation, and grouped count aggregation. It prints a Markdown table plus JSON summaries for copying into issues or release notes.
+
+Run the local stateful-vs-JSON-roundtrip WASM benchmark without live API credentials:
+
+```sh
+MICROPUFFER_STATEFUL_BENCH_ROWS=100000 pnpm bench:stateful
+```
 
 ## Contributing
 

@@ -33,8 +33,14 @@ clean-generated:
 test-live: wasm
     pnpm exec vitest run scripts/micropuffer-live-parity.test.ts
 
+test-wasm: wasm
+    pnpm exec vitest run scripts/micropuffer-wasm-stateful.test.ts
+
 test-fuzz: wasm
     pnpm exec vitest run scripts/micropuffer-live-fuzz.test.ts
 
 bench-live: wasm
     node --experimental-strip-types scripts/micropuffer-live-bench.ts
+
+bench-stateful: wasm
+    node --experimental-strip-types scripts/micropuffer-stateful-bench.ts

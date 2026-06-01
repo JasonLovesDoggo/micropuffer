@@ -3,7 +3,6 @@ import {
   type ErrorResult,
   type JsonObject,
   type JsonValue,
-  type MutationResult,
   HttpError,
   envOrDefault,
   errorText,
@@ -11,19 +10,10 @@ import {
   isJsonObject,
   loadEnv,
   parseJsonObject,
-  parseMutationResult,
   requiredEnv
 } from "./test-utils";
 import {
-  micropuffer_explain_query,
-  micropuffer_list_namespaces,
-  micropuffer_metadata,
-  micropuffer_query,
-  micropuffer_recall,
-  micropuffer_schema,
-  micropuffer_update_schema,
-  micropuffer_warm_cache,
-  micropuffer_write
+  Micropuffer
 } from "micropuffer";
 
 
@@ -39,7 +29,7 @@ const apiKey = requiredEnv("TURBOPUFFER_API_KEY");
 const region = envOrDefault("TURBOPUFFER_REGION", "gcp-us-central1");
 const baseUrl = `https://${region}.turbopuffer.com`;
 
-let micropufferStore: JsonObject = { namespaces: [] };
+const micropuffer = new Micropuffer();
 
 afterAll(async () => {
   for (const namespace of namespacesToDelete) {
@@ -336,10 +326,7 @@ async function assertListNamespaceParity(): Promise<void> {
     `/v1/namespaces?prefix=${encodeURIComponent(namespaceName)}&page_size=10`
   );
   const mini = parseJsonObject(
-    micropuffer_list_namespaces(
-      JSON.stringify(micropufferStore),
-      JSON.stringify({ prefix: namespaceName, page_size: 10 })
-    ),
+    micropuffer.listNamespaces(JSON.stringify({ prefix: namespaceName, page_size: 10 })),
     "micropuffer list response"
   );
   expect(namespaceIds(mini)).toStrictEqual(namespaceIds(live));
@@ -348,7 +335,7 @@ async function assertListNamespaceParity(): Promise<void> {
 async function assertMetadataParity(): Promise<void> {
   const live = await liveJson("GET", `/v1/namespaces/${encodeURIComponent(namespaceName)}/metadata`);
   const mini = parseJsonObject(
-    micropuffer_metadata(JSON.stringify(micropufferStore), namespaceName),
+    micropuffer.metadata(namespaceName),
     "micropuffer metadata response"
   );
   expect(schemaTypes(mini)).toStrictEqual(schemaTypes(live));
@@ -357,7 +344,7 @@ async function assertMetadataParity(): Promise<void> {
 async function assertSchemaParity(): Promise<void> {
   const live = await liveJson("GET", `/v1/namespaces/${encodeURIComponent(namespaceName)}/schema`);
   const mini = parseJsonObject(
-    micropuffer_schema(JSON.stringify(micropufferStore), namespaceName),
+    micropuffer.schema(namespaceName),
     "micropuffer schema response"
   );
   expect(schemaTypes({ schema: mini })).toStrictEqual(schemaTypes({ schema: live }));
@@ -376,16 +363,11 @@ async function assertSchemaUpdateParity(): Promise<void> {
     `/v1/namespaces/${encodeURIComponent(namespaceName)}/schema`,
     schemaUpdate
   );
-  const miniResult = parseMutationResult(
-    micropuffer_update_schema(
-      JSON.stringify(micropufferStore),
-      namespaceName,
-      JSON.stringify(schemaUpdate)
-    ),
+  const mini = parseJsonObject(
+    micropuffer.updateSchema(namespaceName, JSON.stringify(schemaUpdate)),
     "micropuffer schema update response"
   );
-  micropufferStore = miniResult.store;
-  expect(schemaTypes({ schema: miniResult.response })).toStrictEqual(schemaTypes({ schema: live }));
+  expect(schemaTypes({ schema: mini })).toStrictEqual(schemaTypes({ schema: live }));
 }
 
 async function assertWarmCacheParity(): Promise<void> {
@@ -394,7 +376,7 @@ async function assertWarmCacheParity(): Promise<void> {
     `/v1/namespaces/${encodeURIComponent(namespaceName)}/hint_cache_warm`
   );
   const mini = parseJsonObject(
-    micropuffer_warm_cache(JSON.stringify(micropufferStore), namespaceName),
+    micropuffer.warmCache(namespaceName),
     "micropuffer warm cache response"
   );
   expect(mini.status).toBe(live.status);
@@ -412,7 +394,7 @@ async function assertRecallParity(): Promise<void> {
     request
   );
   const mini = parseJsonObject(
-    micropuffer_recall(JSON.stringify(micropufferStore), namespaceName, JSON.stringify(request)),
+    micropuffer.recall(namespaceName, JSON.stringify(request)),
     "micropuffer recall response"
   );
   expect(typeof live.avg_recall).toBe("number");
@@ -430,11 +412,7 @@ async function assertExplainQueryParity(): Promise<void> {
     limit: 3
   };
   const mini = parseJsonObject(
-    micropuffer_explain_query(
-      JSON.stringify(micropufferStore),
-      namespaceName,
-      JSON.stringify(request)
-    ),
+    micropuffer.explainQuery(namespaceName, JSON.stringify(request)),
     "micropuffer explain query response"
   );
   expect(typeof mini.plan_text).toBe("string");
@@ -490,17 +468,15 @@ async function assertBranchParityIfAllowed(lookup: JsonObject): Promise<void> {
 }
 
 function miniWrite(namespace: string, request: JsonObject): JsonObject {
-  const result = parseMutationResult(
-    micropuffer_write(JSON.stringify(micropufferStore), namespace, JSON.stringify(request)),
+  return parseJsonObject(
+    micropuffer.write(namespace, JSON.stringify(request)),
     "micropuffer write response"
   );
-  micropufferStore = result.store;
-  return result.response;
 }
 
 function miniQuery(namespace: string, request: JsonObject): JsonObject {
   return parseJsonObject(
-    micropuffer_query(JSON.stringify(micropufferStore), namespace, JSON.stringify(request)),
+    micropuffer.query(namespace, JSON.stringify(request)),
     "micropuffer query response"
   );
 }

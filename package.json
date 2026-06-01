@@ -22,9 +22,11 @@
     "build:wasm": "just wasm",
     "prepack": "just wasm",
     "bench:live": "just bench-live",
+    "bench:stateful": "just bench-stateful",
     "test": "just check",
     "test:fuzz": "just test-fuzz",
-    "test:live": "just test-live"
+    "test:live": "just test-live",
+    "test:wasm": "just test-wasm"
   },
   "repository": {
     "type": "git",
