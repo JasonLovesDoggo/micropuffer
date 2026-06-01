@@ -7,7 +7,6 @@ use regex::Regex;
 use rust_stemmers::{Algorithm, Stemmer};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value, json};
-use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Mutex, MutexGuard};
@@ -185,7 +184,7 @@ pub struct Namespace {
     pub branching_parent: Option<String>,
     pub documents: Vec<Document>,
     #[serde(skip, default)]
-    query_indexes: RefCell<NamespaceQueryIndexes>,
+    query_indexes: NamespaceQueryIndexCache,
     #[serde(skip)]
     logical_bytes_cache: NamespaceLogicalBytesCache,
 }
@@ -316,6 +315,28 @@ impl NamespaceQueryIndexes {
 
     fn is_empty(&self) -> bool {
         self.equality.is_empty() && self.order.is_empty()
+    }
+}
+
+#[derive(Debug, Default)]
+struct NamespaceQueryIndexCache {
+    indexes: Mutex<NamespaceQueryIndexes>,
+}
+
+impl Clone for NamespaceQueryIndexCache {
+    fn clone(&self) -> Self {
+        Self {
+            indexes: Mutex::new(self.guard().clone()),
+        }
+    }
+}
+
+impl NamespaceQueryIndexCache {
+    fn guard(&self) -> MutexGuard<'_, NamespaceQueryIndexes> {
+        match self.indexes.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 }
 
@@ -1940,7 +1961,7 @@ fn ensure_namespace(store: &mut MiniStore, namespace_name: &str) {
             pinning: None,
             branching_parent: None,
             documents: Vec::new(),
-            query_indexes: RefCell::new(NamespaceQueryIndexes::default()),
+            query_indexes: NamespaceQueryIndexCache::default(),
             logical_bytes_cache: NamespaceLogicalBytesCache::default(),
         });
     }
@@ -1984,7 +2005,7 @@ fn copy_namespace(
         destination.updated_at = logical_now();
         destination.last_write_at = Some(logical_now());
         destination.documents = source.documents;
-        destination.query_indexes.borrow_mut().clear();
+        destination.query_indexes.guard().clear();
         destination.set_cached_logical_bytes(bytes_written);
     } else {
         store.namespaces.push(Namespace {
@@ -1998,7 +2019,7 @@ fn copy_namespace(
             pinning: None,
             branching_parent: branch.then(|| source.name.clone()),
             documents: source.documents,
-            query_indexes: RefCell::new(NamespaceQueryIndexes::default()),
+            query_indexes: NamespaceQueryIndexCache::default(),
             logical_bytes_cache: NamespaceLogicalBytesCache::default(),
         });
         store
@@ -3129,6 +3150,9 @@ fn indexed_and_candidates(
             .ok_or_else(|| QueryError::new("And requires filters."))?,
         "And filters",
     )?;
+    if filters.is_empty() {
+        return Ok(None);
+    }
     let mut candidates: Option<Vec<usize>> = None;
     for child in filters {
         let Some(child_candidates) = indexed_filter_candidates(namespace, child)? else {
@@ -3163,7 +3187,7 @@ fn indexed_or_candidates(
 }
 
 fn equality_postings(namespace: &Namespace, attr: &str, key: &ScalarEqKey) -> Vec<usize> {
-    let mut indexes = namespace.query_indexes.borrow_mut();
+    let mut indexes = namespace.query_indexes.guard();
     let index = indexes
         .equality
         .entry(attr.to_string())
@@ -3188,14 +3212,15 @@ fn build_equality_index(namespace: &Namespace, attr: &str) -> EqualityAttributeI
 }
 
 fn order_index(namespace: &Namespace, key: &OrderIndexKey) -> Vec<usize> {
-    let mut indexes = namespace.query_indexes.borrow_mut();
-    let entries = indexes
+    let positions_by_id = document_positions_by_id_key(namespace);
+    let mut indexes = namespace.query_indexes.guard();
+    indexes
         .order
         .entry(key.clone())
         .or_insert_with(|| build_order_index(namespace, key))
-        .clone();
-    drop(indexes);
-    document_keys_to_ordered_positions(namespace, entries.iter().map(|entry| &entry.id_key))
+        .iter()
+        .filter_map(|entry| positions_by_id.get(&entry.id_key).copied())
+        .collect()
 }
 
 fn build_order_index(namespace: &Namespace, key: &OrderIndexKey) -> Vec<OrderIndexEntry> {
@@ -3221,15 +3246,6 @@ fn document_keys_to_sorted_positions<'a>(
     positions
 }
 
-fn document_keys_to_ordered_positions<'a>(
-    namespace: &Namespace,
-    keys: impl Iterator<Item = &'a String>,
-) -> Vec<usize> {
-    let positions_by_id = document_positions_by_id_key(namespace);
-    keys.filter_map(|key| positions_by_id.get(key).copied())
-        .collect()
-}
-
 fn document_positions_by_id_key(namespace: &Namespace) -> HashMap<String, usize> {
     let mut positions = HashMap::with_capacity(namespace.documents.len());
     for (index, document) in namespace.documents.iter().enumerate() {
@@ -3239,7 +3255,7 @@ fn document_positions_by_id_key(namespace: &Namespace) -> HashMap<String, usize>
 }
 
 fn remove_document_from_cached_indexes(namespace: &Namespace, document: &Document) {
-    let mut indexes = namespace.query_indexes.borrow_mut();
+    let mut indexes = namespace.query_indexes.guard();
     if indexes.is_empty() {
         return;
     }
@@ -3265,7 +3281,7 @@ fn remove_document_from_cached_indexes(namespace: &Namespace, document: &Documen
 }
 
 fn insert_document_into_cached_indexes(namespace: &Namespace, document: &Document) {
-    let mut indexes = namespace.query_indexes.borrow_mut();
+    let mut indexes = namespace.query_indexes.guard();
     if indexes.is_empty() {
         return;
     }

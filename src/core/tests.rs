@@ -413,7 +413,7 @@ fn indexed_eq_filter_uses_scalar_postings() {
     assert!(
         namespace
             .query_indexes
-            .borrow()
+            .guard()
             .equality
             .contains_key("tenant_id")
     );
@@ -446,7 +446,7 @@ fn indexed_order_by_preserves_multi_attribute_and_stable_id_order() {
             .collect::<Vec<_>>(),
         vec![json!("b"), json!("a"), json!("z"), json!("c")]
     );
-    assert_eq!(namespace.query_indexes.borrow().order.len(), 1);
+    assert_eq!(namespace.query_indexes.guard().order.len(), 1);
 }
 
 #[test]
@@ -738,8 +738,8 @@ fn attribute_indexes_are_incrementally_maintained_after_upsert_patch_and_delete(
         vec![json!(1), json!(3)]
     );
     let namespace = store.namespace("indexed-writes").unwrap();
-    assert_eq!(namespace.query_indexes.borrow().equality.len(), 1);
-    assert_eq!(namespace.query_indexes.borrow().order.len(), 1);
+    assert_eq!(namespace.query_indexes.guard().equality.len(), 1);
+    assert_eq!(namespace.query_indexes.guard().order.len(), 1);
 
     write_store(
         &mut store,
@@ -769,8 +769,8 @@ fn attribute_indexes_are_incrementally_maintained_after_upsert_patch_and_delete(
         vec![json!(2), json!(1), json!(3)]
     );
     let namespace = store.namespace("indexed-writes").unwrap();
-    assert_eq!(namespace.query_indexes.borrow().equality.len(), 1);
-    assert_eq!(namespace.query_indexes.borrow().order.len(), 1);
+    assert_eq!(namespace.query_indexes.guard().equality.len(), 1);
+    assert_eq!(namespace.query_indexes.guard().order.len(), 1);
 
     write_store(
         &mut store,
@@ -800,8 +800,8 @@ fn attribute_indexes_are_incrementally_maintained_after_upsert_patch_and_delete(
         vec![json!(2), json!(1)]
     );
     let namespace = store.namespace("indexed-writes").unwrap();
-    assert_eq!(namespace.query_indexes.borrow().equality.len(), 1);
-    assert_eq!(namespace.query_indexes.borrow().order.len(), 1);
+    assert_eq!(namespace.query_indexes.guard().equality.len(), 1);
+    assert_eq!(namespace.query_indexes.guard().order.len(), 1);
 
     write_store(&mut store, "indexed-writes", &json!({"deletes": [1]})).unwrap();
     let deleted = query_store(
@@ -822,8 +822,8 @@ fn attribute_indexes_are_incrementally_maintained_after_upsert_patch_and_delete(
         vec![json!(2)]
     );
     let namespace = store.namespace("indexed-writes").unwrap();
-    assert_eq!(namespace.query_indexes.borrow().equality.len(), 1);
-    assert_eq!(namespace.query_indexes.borrow().order.len(), 1);
+    assert_eq!(namespace.query_indexes.guard().equality.len(), 1);
+    assert_eq!(namespace.query_indexes.guard().order.len(), 1);
 
     write_store(
         &mut store,
@@ -853,8 +853,8 @@ fn attribute_indexes_are_incrementally_maintained_after_upsert_patch_and_delete(
         vec![json!(4), json!(2)]
     );
     let namespace = store.namespace("indexed-writes").unwrap();
-    assert_eq!(namespace.query_indexes.borrow().equality.len(), 1);
-    assert_eq!(namespace.query_indexes.borrow().order.len(), 1);
+    assert_eq!(namespace.query_indexes.guard().equality.len(), 1);
+    assert_eq!(namespace.query_indexes.guard().order.len(), 1);
 }
 
 #[test]
@@ -880,7 +880,7 @@ fn indexed_candidates_are_rechecked_by_filter_evaluator() {
 
     namespace
         .query_indexes
-        .borrow_mut()
+        .guard()
         .equality
         .get_mut("group")
         .unwrap()
@@ -904,6 +904,35 @@ fn indexed_candidates_are_rechecked_by_filter_evaluator() {
             .map(|row| row["id"].clone())
             .collect::<Vec<_>>(),
         vec![json!(1)]
+    );
+}
+
+#[test]
+fn empty_and_filter_falls_back_to_full_evaluator() {
+    let namespace: Namespace = serde_json::from_value(json!({
+        "name": "empty-and",
+        "documents": [
+            {"id": 1, "score": 3},
+            {"id": 2, "score": 1},
+            {"id": 3, "score": 2}
+        ]
+    }))
+    .unwrap();
+    let response = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["score", "asc"],
+            "filters": ["And", []],
+            "limit": 10
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&response)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(2), json!(3), json!(1)]
     );
 }
 
@@ -989,8 +1018,8 @@ fn indexed_order_and_filters_track_by_filter_writes_and_edge_values() {
     .unwrap();
     assert!(rows(&remaining).is_empty());
     let namespace = store.namespace("edge-indexes").unwrap();
-    assert_eq!(namespace.query_indexes.borrow().equality.len(), 1);
-    assert_eq!(namespace.query_indexes.borrow().order.len(), 1);
+    assert_eq!(namespace.query_indexes.guard().equality.len(), 1);
+    assert_eq!(namespace.query_indexes.guard().order.len(), 1);
 }
 
 #[test]
@@ -1014,7 +1043,7 @@ fn copy_and_branch_start_with_empty_independent_query_indexes() {
             .namespace("demo")
             .unwrap()
             .query_indexes
-            .borrow()
+            .guard()
             .is_empty()
     );
 
@@ -1034,7 +1063,7 @@ fn copy_and_branch_start_with_empty_independent_query_indexes() {
             .namespace("demo-copy-indexes")
             .unwrap()
             .query_indexes
-            .borrow()
+            .guard()
             .is_empty()
     );
     assert!(
@@ -1043,7 +1072,7 @@ fn copy_and_branch_start_with_empty_independent_query_indexes() {
             .namespace("demo-branch-indexes")
             .unwrap()
             .query_indexes
-            .borrow()
+            .guard()
             .is_empty()
     );
 
