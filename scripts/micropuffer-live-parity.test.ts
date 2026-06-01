@@ -730,6 +730,23 @@ async function assertErrorParity(): Promise<void> {
   const miniMissingMetric = miniWriteError(metricNamespace, missingMetricWrite);
   expectErrorParity(miniMissingMetric, liveMissingMetric);
 
+  const schemaAnnMetricWrite: JsonObject = {
+    schema: {
+      vector: {
+        type: "[2]f32",
+        ann: { distance_metric: "euclidean" }
+      }
+    },
+    upsert_rows: [{ id: 1, vector: [1, 0] }]
+  };
+  const liveSchemaAnnMetric = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(metricNamespace)}`,
+    schemaAnnMetricWrite
+  );
+  const miniSchemaAnnMetric = miniWriteError(metricNamespace, schemaAnnMetricWrite);
+  expectErrorParity(miniSchemaAnnMetric, liveSchemaAnnMetric);
+
   const invalidMetricWrite: JsonObject = {
     distance_metric: "bad",
     upsert_rows: [{ id: 1, vector: [1, 0] }]

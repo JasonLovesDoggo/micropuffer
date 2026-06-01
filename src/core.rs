@@ -2656,6 +2656,11 @@ fn validate_distance_metric_for_write(
         ));
     }
     if distance_metric.is_none() {
+        if write_schema_has_ann_distance_metric(schema) {
+            return Err(QueryError::new(
+                "💔 `distance_metric` must be specified as a field at the top level of the write request, not in the `ann` configuration for an attribute",
+            ));
+        }
         return Err(QueryError::new(
             "💔 distance_metric must be specified for write to namespace with a vector",
         ));
@@ -2665,6 +2670,22 @@ fn validate_distance_metric_for_write(
 
 fn namespace_has_dense_vector_columns(namespace: &Namespace) -> Result<bool, QueryError> {
     Ok(!dense_vector_attributes(&inferred_schema(namespace))?.is_empty())
+}
+
+fn write_schema_has_ann_distance_metric(schema: Option<&Value>) -> bool {
+    schema
+        .and_then(Value::as_object)
+        .map(|schema| {
+            schema.values().any(|definition| {
+                definition
+                    .as_object()
+                    .and_then(|definition| definition.get("ann"))
+                    .and_then(Value::as_object)
+                    .and_then(|ann| ann.get("distance_metric"))
+                    .is_some()
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn write_schema_has_dense_vector(schema: Option<&Value>) -> Result<bool, QueryError> {
