@@ -261,6 +261,7 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
   await assertRecallParity();
   await assertExplainQueryParity();
   await assertErrorParity();
+  await assertInvalidNamespaceParity();
   await assertBranchParityIfAllowed(afterDeleteLookup);
 });
 
@@ -796,6 +797,31 @@ async function assertErrorParity(): Promise<void> {
   expectErrorParity(miniCopyConflict, liveCopyConflict);
 }
 
+async function assertInvalidNamespaceParity(): Promise<void> {
+  const query: JsonObject = {
+    rank_by: ["id", "asc"],
+    limit: 1
+  };
+  const cases: Array<{ namespace: string }> = [
+    { namespace: "bad namespace" },
+    { namespace: "a".repeat(129) }
+  ];
+
+  for (const testCase of cases) {
+    const live = await liveText(
+      "POST",
+      `/v2/namespaces/${encodeURIComponent(testCase.namespace)}/query`,
+      query
+    );
+    const mini = parseJsonObject(
+      micropuffer.queryResponse(testCase.namespace, JSON.stringify(query)),
+      "micropuffer invalid namespace response envelope"
+    );
+    expect(mini.status).toBe(live.status);
+    expect(mini.body).toBe(live.body);
+  }
+}
+
 async function assertBranchParityIfAllowed(lookup: JsonObject): Promise<void> {
   try {
     await liveWrite(branchNamespaceName, { branch_from_namespace: namespaceName });
@@ -949,6 +975,26 @@ async function liveJson(
     throw new HttpError(response.status, responseBody);
   }
   return parsed;
+}
+
+async function liveText(
+  method: "DELETE" | "GET" | "POST",
+  path: string,
+  body?: JsonObject
+): Promise<{ status: number; body: string }> {
+  const init: RequestInit = {
+    method,
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    }
+  };
+  if (body !== undefined) {
+    init.body = JSON.stringify(body);
+  }
+
+  const response = await fetch(`${baseUrl}${path}`, init);
+  return { status: response.status, body: await response.text() };
 }
 
 async function deleteLiveNamespace(namespace: string): Promise<void> {

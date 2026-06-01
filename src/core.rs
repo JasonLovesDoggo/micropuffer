@@ -63,6 +63,7 @@ impl Micropuffer {
     }
 
     pub fn delete_namespace(&mut self, namespace_name: &str) -> Result<Value, QueryError> {
+        validate_namespace_name(namespace_name)?;
         let Some(index) = self
             .store
             .namespaces
@@ -118,10 +119,12 @@ impl Micropuffer {
     }
 
     pub fn metadata(&self, namespace_name: &str) -> Result<Value, QueryError> {
+        validate_namespace_name(namespace_name)?;
         namespace_metadata(self.store.namespace(namespace_name)?)
     }
 
     pub fn schema(&self, namespace_name: &str) -> Result<Value, QueryError> {
+        validate_namespace_name(namespace_name)?;
         namespace_schema(self.store.namespace(namespace_name)?)
     }
 
@@ -146,10 +149,12 @@ impl Micropuffer {
         namespace_name: &str,
         request: &Value,
     ) -> Result<Value, QueryError> {
+        validate_namespace_name(namespace_name)?;
         export_namespace(self.store.namespace(namespace_name)?, request)
     }
 
     pub fn warm_cache(&self, namespace_name: &str) -> Result<Value, QueryError> {
+        validate_namespace_name(namespace_name)?;
         self.store.namespace(namespace_name)?;
         Ok(json!({
             "status": "ACCEPTED",
@@ -158,6 +163,7 @@ impl Micropuffer {
     }
 
     pub fn recall(&self, namespace_name: &str, request: &Value) -> Result<Value, QueryError> {
+        validate_namespace_name(namespace_name)?;
         recall_namespace(self.store.namespace(namespace_name)?, request)
     }
 
@@ -166,6 +172,7 @@ impl Micropuffer {
         namespace_name: &str,
         request: &Value,
     ) -> Result<Value, QueryError> {
+        validate_namespace_name(namespace_name)?;
         explain_query(self.store.namespace(namespace_name)?, request)
     }
 }
@@ -835,6 +842,7 @@ pub fn query_store(
     namespace_name: &str,
     request: &Value,
 ) -> Result<Value, QueryError> {
+    validate_namespace_name(namespace_name)?;
     let namespace = store.namespace(namespace_name)?;
     query_namespace(namespace, request)
 }
@@ -901,6 +909,7 @@ pub fn update_namespace_schema(
     namespace_name: &str,
     request: &Value,
 ) -> Result<Value, QueryError> {
+    validate_namespace_name(namespace_name)?;
     let schema = as_object(request, "schema update request")?;
     let namespace = store
         .namespace_mut(namespace_name)
@@ -916,6 +925,7 @@ pub fn patch_namespace_metadata(
     namespace_name: &str,
     request: &Value,
 ) -> Result<Value, QueryError> {
+    validate_namespace_name(namespace_name)?;
     let request = as_object(request, "metadata patch request")?;
     let namespace = store
         .namespace_mut(namespace_name)
@@ -2428,17 +2438,20 @@ impl WriteSummary {
 }
 
 fn validate_namespace_name(name: &str) -> Result<(), QueryError> {
-    if name.is_empty() || name.len() > 128 {
-        return Err(QueryError::new(
-            "namespace names must be between 1 and 128 characters.",
-        ));
+    if name.is_empty() {
+        return Err(namespace_not_found(name));
+    }
+    if name.len() > 128 {
+        return Err(QueryError::invalid_url(format!(
+            "Invalid URL: Namespace `{name}` is too long, limit is currently 128 characters"
+        )));
     }
     if !name
         .chars()
         .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character))
     {
-        return Err(QueryError::new(
-            "namespace names must match [A-Za-z0-9-_.]{1,128}.",
+        return Err(QueryError::invalid_url(
+            "Invalid URL: Namespace contains invalid characters, must be [A-Za-z0-9-_.]",
         ));
     }
     Ok(())
