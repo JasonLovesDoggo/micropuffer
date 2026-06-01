@@ -26,6 +26,7 @@ Sources checked:
   - `ANN`
   - `kNN`
   - `BM25`
+  - BM25 array-query rejection for word-tokenized fields
   - `SparseKNN`
   - order by one attribute
   - order by multiple attributes
