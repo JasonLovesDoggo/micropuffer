@@ -23,6 +23,10 @@ impl QueryError {
         Self::with_status(404, message)
     }
 
+    pub(crate) fn internal(message: impl Into<String>) -> Self {
+        Self::with_status(500, message)
+    }
+
     pub(crate) fn invalid_url(message: impl Into<String>) -> Self {
         Self::with_status(400, message).with_plain_text_body()
     }

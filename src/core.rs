@@ -197,28 +197,29 @@ fn namespace_list_start(names: &[&str], cursor: Option<&str>) -> Result<usize, Q
     let Some(cursor) = cursor else {
         return Ok(0);
     };
-    if let Ok(offset) = cursor.parse::<usize>() {
-        return Ok(offset.min(names.len()));
-    }
     let decoded = STANDARD_NO_PAD
         .decode(cursor)
         .or_else(|_| STANDARD.decode(cursor))
-        .map_err(|_| QueryError::new("cursor must be a valid namespace list cursor."))?;
-    let cursor: Value = serde_json::from_slice(&decoded)
-        .map_err(|_| QueryError::new("cursor must be a valid namespace list cursor."))?;
+        .map_err(|_| namespace_list_cursor_error())?;
+    let cursor: Value =
+        serde_json::from_slice(&decoded).map_err(|_| namespace_list_cursor_error())?;
     let Some(start_after) = cursor
         .as_object()
         .and_then(|object| object.get("start_after"))
         .and_then(Value::as_str)
     else {
-        return Err(QueryError::new(
-            "cursor must be a valid namespace list cursor.",
-        ));
+        return Ok(0);
     };
     Ok(names
         .iter()
         .position(|name| namespace_list_table_key(name).as_str() > start_after)
         .unwrap_or(names.len()))
+}
+
+fn namespace_list_cursor_error() -> QueryError {
+    QueryError::internal(
+        "🐡 Unknown error, if this persists, please contact support!! We'll be happy to help :)",
+    )
 }
 
 fn namespace_list_cursor(namespace: &str) -> String {
