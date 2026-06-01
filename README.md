@@ -81,6 +81,8 @@ Run the local stateful WASM benchmark without live API credentials:
 MICROPUFFER_STATEFUL_BENCH_ROWS=100000 pnpm bench:stateful
 ```
 
+It covers the same query cases as the live benchmark, excluding the live write timing.
+
 ## Contributing
 
 See `CONTRIBUTING.md`. The project uses Conventional Commits and the MIT license.
