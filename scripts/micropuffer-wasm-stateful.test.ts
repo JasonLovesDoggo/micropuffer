@@ -127,7 +127,10 @@ test("response methods expose HTTP-style status envelopes", () => {
   });
 
   const write = parseJsonObject(
-    engine.writeResponse("local", json({ upsert_rows: [{ id: 1, vector: [1, 0] }] })),
+    engine.writeResponse(
+      "local",
+      json({ distance_metric: "cosine_distance", upsert_rows: [{ id: 1, vector: [1, 0] }] })
+    ),
     "write response envelope"
   );
   expect(write.status).toBe(200);
@@ -157,6 +160,7 @@ function seedEngine(rowCount: number): Micropuffer {
   engine.write(
     namespaceName,
     json({
+      distance_metric: "cosine_distance",
       upsert_rows: Array.from({ length: rowCount }, (_, index) => ({
         id: index + 1,
         vector: [index + 1, rowCount - index],

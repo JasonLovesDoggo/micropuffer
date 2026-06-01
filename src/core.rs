@@ -320,7 +320,7 @@ fn default_encryption() -> Value {
     json!({ "sse": true })
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DistanceMetric {
     CosineDistance,
@@ -333,9 +333,19 @@ impl DistanceMetric {
         match value.as_str() {
             Some("cosine_distance") => Ok(Self::CosineDistance),
             Some("euclidean_squared") => Ok(Self::EuclideanSquared),
-            _ => Err(QueryError::new(
-                "distance_metric must be 'cosine_distance' or 'euclidean_squared'.",
+            Some(metric) => Err(QueryError::unprocessable(format!(
+                "Failed to deserialize the JSON body into the target type: distance_metric: unknown variant `{metric}`, expected one of `Unknown`, `euclidean_squared`, `cosine_distance`, `euclidean`, `Query`"
+            ))),
+            _ => Err(QueryError::unprocessable(
+                "Failed to deserialize the JSON body into the target type: distance_metric: invalid type, expected `cosine_distance` or `euclidean_squared`",
             )),
+        }
+    }
+
+    fn as_write_error_str(self) -> &'static str {
+        match self {
+            Self::CosineDistance => "cosine_distance",
+            Self::EuclideanSquared => "euclidean_squared",
         }
     }
 }
@@ -1153,9 +1163,23 @@ pub fn write_store(
         validate_branch_request(request)?;
         return copy_namespace(store, namespace_name, branch_from, true, None);
     }
+    let parsed_distance_metric = request
+        .get("distance_metric")
+        .map(DistanceMetric::parse)
+        .transpose()?;
+    let mut upserts =
+        collect_write_rows(request.get("upsert_rows"), request.get("upsert_columns"))?;
+    let mut patches = collect_write_rows(request.get("patch_rows"), request.get("patch_columns"))?;
+    let deletes = collect_delete_ids(request.get("deletes"))?;
+    reject_duplicate_write_ids(&upserts, &patches, &deletes)?;
+    validate_distance_metric_for_write(
+        store.namespace(namespace_name).ok(),
+        parsed_distance_metric,
+        request.get("schema"),
+        &upserts,
+    )?;
     ensure_namespace(store, namespace_name);
-    if let Some(distance_metric) = request.get("distance_metric") {
-        let metric = DistanceMetric::parse(distance_metric)?;
+    if let Some(metric) = parsed_distance_metric {
         let namespace = store
             .namespace_mut(namespace_name)
             .ok_or_else(|| QueryError::new("namespace disappeared during write."))?;
@@ -1217,12 +1241,6 @@ pub fn write_store(
         summary.rows_remaining |= outcome.rows_remaining;
         summary.patched_ids.extend(outcome.ids);
     }
-
-    let mut upserts =
-        collect_write_rows(request.get("upsert_rows"), request.get("upsert_columns"))?;
-    let mut patches = collect_write_rows(request.get("patch_rows"), request.get("patch_columns"))?;
-    let deletes = collect_delete_ids(request.get("deletes"))?;
-    reject_duplicate_write_ids(&upserts, &patches, &deletes)?;
 
     let upsert_condition = request.get("upsert_condition");
     let patch_condition = request.get("patch_condition");
@@ -2542,6 +2560,68 @@ fn reject_unexpected_write_fields(
         }
     }
     Ok(())
+}
+
+fn validate_distance_metric_for_write(
+    namespace: Option<&Namespace>,
+    distance_metric: Option<DistanceMetric>,
+    schema: Option<&Value>,
+    upserts: &[WriteRow],
+) -> Result<(), QueryError> {
+    if let (Some(namespace), Some(distance_metric)) = (namespace, distance_metric)
+        && namespace.distance_metric != distance_metric
+    {
+        return Err(QueryError::new(format!(
+            "💔 distance metric mismatch, expected {}, got {}",
+            namespace.distance_metric.as_write_error_str(),
+            distance_metric.as_write_error_str()
+        )));
+    }
+
+    let existing_vector_columns = namespace
+        .map(namespace_has_dense_vector_columns)
+        .transpose()?
+        .unwrap_or(false);
+    let introduces_vector_column =
+        write_schema_has_dense_vector(schema)? || upserts.iter().any(write_row_has_vector);
+
+    if !introduces_vector_column || existing_vector_columns {
+        return Ok(());
+    }
+    if namespace.is_some_and(|namespace| !namespace.documents.is_empty()) {
+        return Err(QueryError::new(
+            "💔 Vector provided for namespace without vector attribute",
+        ));
+    }
+    if distance_metric.is_none() {
+        return Err(QueryError::new(
+            "💔 distance_metric must be specified for write to namespace with a vector",
+        ));
+    }
+    Ok(())
+}
+
+fn namespace_has_dense_vector_columns(namespace: &Namespace) -> Result<bool, QueryError> {
+    Ok(!dense_vector_attributes(&inferred_schema(namespace))?.is_empty())
+}
+
+fn write_schema_has_dense_vector(schema: Option<&Value>) -> Result<bool, QueryError> {
+    let Some(schema) = schema else {
+        return Ok(false);
+    };
+    let schema = as_object(schema, "schema")?;
+    for definition in schema.values() {
+        if is_dense_vector_type(schema_type_name(definition)?) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn write_row_has_vector(row: &WriteRow) -> bool {
+    row.attributes
+        .get("vector")
+        .is_some_and(|value| value.is_array() || value.is_string())
 }
 
 fn collect_write_rows(
