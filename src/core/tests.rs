@@ -736,6 +736,49 @@ fn scalar_grouped_count_preserves_sorted_group_order() {
 }
 
 #[test]
+fn count_id_aggregate_matches_live_deprecated_variant() {
+    let counted = query_namespace(
+        &namespace(),
+        &json!({
+            "aggregate_by": {"count": ["Count", "id"]}
+        }),
+    )
+    .unwrap();
+    assert_eq!(counted["aggregations"]["count"], 3);
+
+    let grouped = query_namespace(
+        &namespace(),
+        &json!({
+            "aggregate_by": {"count": ["Count", "id"]},
+            "group_by": ["tenant_id"],
+            "top_k": 10
+        }),
+    )
+    .unwrap();
+    let groups = grouped
+        .get("aggregation_groups")
+        .and_then(Value::as_array)
+        .unwrap();
+    assert!(
+        groups
+            .iter()
+            .any(|group| group["tenant_id"] == "alpha" && group["count"] == 2)
+    );
+
+    let unsupported = query_namespace(
+        &namespace(),
+        &json!({
+            "aggregate_by": {"count": ["Count", "score"]}
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(
+        unsupported.to_string(),
+        "💔 aggregate_by with attributes other than \"id\" not yet supported"
+    );
+}
+
+#[test]
 fn multi_query_preserves_result_order() {
     let response = query_namespace(
         &namespace(),

@@ -193,6 +193,13 @@ function fixedCases(): FuzzCase[] {
       }
     },
     {
+      name: "aggregate-count-id-deprecated",
+      request: {
+        aggregate_by: { count: ["Count", "id"] },
+        filters: ["public", "Eq", 1]
+      }
+    },
+    {
       name: "aggregate-group-category",
       request: {
         aggregate_by: { count: ["Count"] },
