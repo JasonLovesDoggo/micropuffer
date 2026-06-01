@@ -1,6 +1,6 @@
 use crate::{Micropuffer as CoreMicropuffer, MiniStore, QueryError};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::convert::TryFrom;
 use std::fmt::Display;
 use wasm_bindgen::prelude::*;
@@ -33,6 +33,19 @@ fn page_size_from_request(request: &Value) -> Result<usize, JsValue> {
 
 fn query_error(error: QueryError) -> JsValue {
     JsValue::from_str(&error.to_string())
+}
+
+#[derive(Serialize)]
+struct HttpResponse {
+    status: u16,
+    body: Value,
+}
+
+fn error_body(error: &QueryError) -> Value {
+    json!({
+        "status": "error",
+        "error": error.to_string()
+    })
 }
 
 #[wasm_bindgen]
@@ -74,6 +87,23 @@ impl Micropuffer {
                 .query(namespace_name, &request)
                 .map_err(query_error)?,
         )
+    }
+
+    #[wasm_bindgen(js_name = queryResponse)]
+    pub fn query_response(
+        &self,
+        namespace_name: &str,
+        request_json: &str,
+    ) -> Result<String, JsValue> {
+        let request = read_request(request_json)?;
+        let response = match self.engine.query(namespace_name, &request) {
+            Ok(body) => HttpResponse { status: 200, body },
+            Err(error) => HttpResponse {
+                status: error.status_code(),
+                body: error_body(&error),
+            },
+        };
+        write_json(response)
     }
 
     pub fn write(&mut self, namespace_name: &str, request_json: &str) -> Result<String, JsValue> {

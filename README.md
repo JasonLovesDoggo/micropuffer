@@ -16,8 +16,11 @@ import { Micropuffer } from "micropuffer";
 const engine = new Micropuffer();
 engine.write("local", JSON.stringify({ upsert_rows: [{ id: 1, vector: [1, 0] }] }));
 const response = engine.query("local", JSON.stringify({ rank_by: ["id", "asc"], limit: 10 }));
+const httpResponse = engine.queryResponse("local", JSON.stringify({ rank_by: ["id", "asc"], limit: 10 }));
 const storeJson = engine.exportStore();
 ```
+
+`query` throws a string error for the raw WASM API. `queryResponse` returns a JSON string with `{ status, body }`, which is better for HTTP mocks that need turbopuffer-style error status and body parity.
 
 The npm package ships generated `wasm-bindgen` output from `pkg/`. Generated artifacts are built during `prepack` and in the publish workflow, but are not committed to git.
 

@@ -2369,6 +2369,57 @@ fn export_namespace_uses_live_columnar_shape_with_missing_attribute_nulls() {
 }
 
 #[test]
+fn query_validation_errors_carry_http_status_codes() {
+    let namespace = namespace();
+
+    let semantic_conflict = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["id", "asc"],
+            "limit": 1,
+            "include_attributes": ["title"],
+            "exclude_attributes": ["body"]
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(semantic_conflict.status_code(), 400);
+    assert_eq!(
+        semantic_conflict.to_string(),
+        "💔 cannot specify both include_attributes and exclude_attributes"
+    );
+
+    let invalid_projection = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["id", "asc"],
+            "limit": 1,
+            "exclude_attributes": true
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(invalid_projection.status_code(), 422);
+    assert_eq!(
+        invalid_projection.to_string(),
+        "Failed to deserialize the JSON body into the target type: invalid type: boolean `true`, expected a sequence"
+    );
+
+    let invalid_vector_encoding = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["id", "asc"],
+            "limit": 1,
+            "vector_encoding": "bad"
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(invalid_vector_encoding.status_code(), 422);
+    assert_eq!(
+        invalid_vector_encoding.to_string(),
+        "Failed to deserialize the JSON body into the target type: vector_encoding: unknown variant `bad`, expected `float` or `base64`"
+    );
+}
+
+#[test]
 fn schema_update_and_warm_cache_match_workspace_shapes() {
     let mut clone = Micropuffer::new();
     clone
