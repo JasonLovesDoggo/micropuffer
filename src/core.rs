@@ -1083,18 +1083,15 @@ fn columnar_export_from_query_result(query_result: &Value) -> Result<Value, Quer
 
 pub fn recall_namespace(namespace: &Namespace, request: &Value) -> Result<Value, QueryError> {
     let object = as_object(request, "recall request")?;
-    let num = object
-        .get("num")
-        .and_then(value_as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(25)
-        .clamp(1, 100);
-    let top_k = object
-        .get("top_k")
-        .and_then(value_as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(10)
-        .clamp(1, 10_000);
+    validate_recall_request_shape(object)?;
+    let num = parse_recall_usize(object.get("num"), "num", 25)?;
+    if !(1..=200).contains(&num) {
+        return Err(QueryError::new("💔 samples must be between 1 and 200"));
+    }
+    let top_k = parse_recall_usize(object.get("top_k"), "top_k", 10)?;
+    if !(1..=10_000).contains(&top_k) {
+        return Err(QueryError::new("💔 top_k must be between 1 and 10000"));
+    }
     let filters = object.get("filters");
     let candidates = namespace
         .documents
@@ -1132,6 +1129,47 @@ pub fn recall_namespace(namespace: &Namespace, request: &Value) -> Result<Value,
     response.insert("avg_exhaustive_count".to_string(), number_value(avg_count));
     response.insert("avg_ann_count".to_string(), number_value(avg_count));
     Ok(Value::Object(response))
+}
+
+fn validate_recall_request_shape(object: &Map<String, Value>) -> Result<(), QueryError> {
+    if let Some(filters) = object.get("filters")
+        && !filters.is_array()
+    {
+        return Err(QueryError::unprocessable(
+            "Failed to deserialize the JSON body into the target type: filters: data did not match any variant of untagged enum FiltersInput",
+        ));
+    }
+    if let Some(include_ground_truth) = object.get("include_ground_truth")
+        && !include_ground_truth.is_boolean()
+    {
+        return Err(QueryError::unprocessable(format!(
+            "Failed to deserialize the JSON body into the target type: include_ground_truth: invalid type: {}, expected a boolean",
+            serde_consistency_type_name(include_ground_truth)
+        )));
+    }
+    Ok(())
+}
+
+fn parse_recall_usize(
+    value: Option<&Value>,
+    field: &str,
+    default: usize,
+) -> Result<usize, QueryError> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    let Some(raw) = value_as_u64(value) else {
+        return Err(QueryError::unprocessable(format!(
+            "Failed to deserialize the JSON body into the target type: {field}: invalid type: {}, expected usize",
+            serde_consistency_type_name(value)
+        )));
+    };
+    usize::try_from(raw).map_err(|_| {
+        QueryError::unprocessable(format!(
+            "Failed to deserialize the JSON body into the target type: {field}: invalid type: {}, expected usize",
+            serde_consistency_type_name(value)
+        ))
+    })
 }
 
 fn document_vector_value(document: &Document) -> Option<Value> {

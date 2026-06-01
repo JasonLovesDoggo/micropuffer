@@ -3439,6 +3439,54 @@ fn recall_and_explain_query_match_debug_endpoint_shapes() {
     assert_eq!(capped_recall["avg_recall"], 1.0);
     assert_eq!(capped_recall["avg_exhaustive_count"], 10.0);
     assert_eq!(capped_recall["avg_ann_count"], 10.0);
+    let invalid_num = clone
+        .recall("debug", &json!({"num": "bad", "top_k": 1}))
+        .unwrap_err();
+    assert_eq!(invalid_num.status_code(), 422);
+    assert_eq!(
+        invalid_num.to_string(),
+        "Failed to deserialize the JSON body into the target type: num: invalid type: string \"bad\", expected usize"
+    );
+    let zero_num = clone
+        .recall("debug", &json!({"num": 0, "top_k": 1}))
+        .unwrap_err();
+    assert_eq!(zero_num.status_code(), 400);
+    assert_eq!(zero_num.to_string(), "💔 samples must be between 1 and 200");
+    let invalid_top_k = clone
+        .recall("debug", &json!({"num": 1, "top_k": "bad"}))
+        .unwrap_err();
+    assert_eq!(invalid_top_k.status_code(), 422);
+    assert_eq!(
+        invalid_top_k.to_string(),
+        "Failed to deserialize the JSON body into the target type: top_k: invalid type: string \"bad\", expected usize"
+    );
+    let zero_top_k = clone
+        .recall("debug", &json!({"num": 1, "top_k": 0}))
+        .unwrap_err();
+    assert_eq!(zero_top_k.status_code(), 400);
+    assert_eq!(
+        zero_top_k.to_string(),
+        "💔 top_k must be between 1 and 10000"
+    );
+    let invalid_filters = clone
+        .recall("debug", &json!({"num": 1, "top_k": 1, "filters": "bad"}))
+        .unwrap_err();
+    assert_eq!(invalid_filters.status_code(), 422);
+    assert_eq!(
+        invalid_filters.to_string(),
+        "Failed to deserialize the JSON body into the target type: filters: data did not match any variant of untagged enum FiltersInput"
+    );
+    let invalid_ground_truth = clone
+        .recall(
+            "debug",
+            &json!({"num": 1, "top_k": 1, "include_ground_truth": "bad"}),
+        )
+        .unwrap_err();
+    assert_eq!(invalid_ground_truth.status_code(), 422);
+    assert_eq!(
+        invalid_ground_truth.to_string(),
+        "Failed to deserialize the JSON body into the target type: include_ground_truth: invalid type: string \"bad\", expected a boolean"
+    );
 
     let explained = clone
         .explain_query(
