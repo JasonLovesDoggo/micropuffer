@@ -1096,6 +1096,8 @@ fn writes_upsert_patch_delete_and_query_in_memory() {
         }),
     )
     .unwrap();
+    assert_eq!(write["status"], "OK");
+    assert_eq!(write["message"], "documents committed successfully");
     assert_eq!(write["rows_affected"], 2);
     let response = query_store(
         &store,
@@ -1968,9 +1970,11 @@ fn micropuffer_lists_copies_and_deletes_namespaces() {
     let mut clone = Micropuffer::from_store(MiniStore {
         namespaces: vec![namespace()],
     });
-    clone
+    let copied_namespace = clone
         .write("demo-copy", &json!({"copy_from_namespace": "demo"}))
         .unwrap();
+    assert_eq!(copied_namespace["status"], "OK");
+    assert_eq!(copied_namespace["message"], "namespace cloned successfully");
     let listed = clone.list_namespaces(Some("demo"), None, 10).unwrap();
     let namespaces = listed.get("namespaces").and_then(Value::as_array).unwrap();
     assert_eq!(namespaces.len(), 2);
@@ -1981,7 +1985,8 @@ fn micropuffer_lists_copies_and_deletes_namespaces() {
         )
         .unwrap();
     assert_eq!(copied["aggregations"]["count"], 3);
-    clone.delete_namespace("demo-copy").unwrap();
+    let deleted = clone.delete_namespace("demo-copy").unwrap();
+    assert_eq!(deleted, json!({"status": "OK"}));
     assert!(
         clone
             .query("demo-copy", &json!({"rank_by": ["id", "asc"], "limit": 1}))
