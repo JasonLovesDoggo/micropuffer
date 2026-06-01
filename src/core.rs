@@ -4783,6 +4783,7 @@ fn project_document(
     }
     match (include, exclude) {
         (None, None) => {}
+        (Some(Value::Bool(false)), None) => {}
         (Some(Value::Bool(true)), None) => {
             if let Some(vector) = document_vector_value(document) {
                 row.insert(

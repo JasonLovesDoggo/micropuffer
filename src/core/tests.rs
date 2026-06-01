@@ -1061,6 +1061,18 @@ fn vector_projection_export_and_roundtrip_keep_base64_and_typed_cache() {
     assert_eq!(rows(&query_include)[0]["vector"], expected_vector);
     assert_eq!(rows(&query_include)[0]["title"], "one");
 
+    let query_include_false = clone
+        .query(
+            "vector-projection",
+            &json!({
+                "rank_by": ["id", "asc"],
+                "limit": 1,
+                "include_attributes": false
+            }),
+        )
+        .unwrap();
+    assert_eq!(rows(&query_include_false), &[json!({"id": 1})]);
+
     let query_exclude = clone
         .query(
             "vector-projection",

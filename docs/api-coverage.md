@@ -31,6 +31,7 @@ Sources checked:
   - rank expressions using `Sum`, `Max`, `Product`, `Attribute`, filters-as-scores
   - filters: equality, membership, array containment, numeric comparisons, array comparisons, glob, case-insensitive glob, regex, fuzzy, token filters, boolean combinators
   - projections with `include_attributes`
+  - projections with `include_attributes: false`
   - projections with `exclude_attributes`
   - `vector_encoding: "base64"` output
   - `limit.per` for order-by-attribute queries
@@ -79,7 +80,7 @@ Sources checked:
 
 ## Spec/live mismatches found while testing
 
-- OpenAPI allows `include_attributes: false`, but live turbopuffer currently rejects it with `include_attributes must be true or an array`.
+- `include_attributes: false` is accepted by live turbopuffer and behaves like omitting `include_attributes`.
 - OpenAPI lists BM25 array-token variants, but live turbopuffer currently rejects `["text", "BM25", ["quick", "fish"]]`.
 - Ungrouped aggregation rejects `top_k`; grouped aggregation defaults when `top_k` is omitted.
 - Live aggregate queries reject the `limit` field before execution; micropuffer rejects it with the same stable field name but does not reproduce Serde's byte-offset wording.
