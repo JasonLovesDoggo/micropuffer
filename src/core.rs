@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Mutex, MutexGuard};
 use unicode_segmentation::UnicodeSegmentation;
 
-const PATCH_BY_FILTER_LIMIT: usize = 50_000;
+const PATCH_BY_FILTER_LIMIT: usize = 500_000;
 const DELETE_BY_FILTER_LIMIT: usize = 5_000_000;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -3073,6 +3073,15 @@ fn patch_by_filter(
     request: &Value,
     allow_partial: bool,
 ) -> Result<FilterWriteOutcome, QueryError> {
+    patch_by_filter_with_limit(namespace, request, allow_partial, PATCH_BY_FILTER_LIMIT)
+}
+
+fn patch_by_filter_with_limit(
+    namespace: &mut Namespace,
+    request: &Value,
+    allow_partial: bool,
+    limit: usize,
+) -> Result<FilterWriteOutcome, QueryError> {
     let request = as_object(request, "patch_by_filter")?;
     let filter = request
         .get("filters")
@@ -3103,16 +3112,13 @@ fn patch_by_filter(
         .into_iter()
         .filter_map(|(index, matches)| matches.then_some(index))
         .collect::<Vec<_>>();
-    if matching.len() > PATCH_BY_FILTER_LIMIT && !allow_partial {
+    if matching.len() > limit && !allow_partial {
         return Err(QueryError::new(
             "patch_by_filter matched more documents than allowed for one request.",
         ));
     }
-    let rows_remaining = matching.len() > PATCH_BY_FILTER_LIMIT;
-    let selected = matching
-        .into_iter()
-        .take(PATCH_BY_FILTER_LIMIT)
-        .collect::<BTreeSet<_>>();
+    let rows_remaining = matching.len() > limit;
+    let selected = matching.into_iter().take(limit).collect::<BTreeSet<_>>();
     let mut patched = Vec::new();
     let previous = selected
         .iter()
