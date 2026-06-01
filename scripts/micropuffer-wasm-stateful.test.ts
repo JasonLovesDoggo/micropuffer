@@ -162,6 +162,18 @@ test("response methods expose HTTP-style status envelopes", () => {
   expect(write.status).toBe(200);
   expect(write.body).toMatchObject({ status: "OK", rows_affected: 1, rows_upserted: 1 });
 
+  const warmCache = parseJsonObject(
+    engine.warmCacheResponse("local"),
+    "warm cache response envelope"
+  );
+  expect(warmCache).toStrictEqual({
+    status: 202,
+    body: {
+      status: "ACCEPTED",
+      message: "cache warm hint accepted"
+    }
+  });
+
   const deleteOk = parseJsonObject(
     engine.deleteNamespaceResponse("local"),
     "delete response envelope"

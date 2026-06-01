@@ -597,15 +597,17 @@ async function assertSchemaUpdateParity(): Promise<void> {
 }
 
 async function assertWarmCacheParity(): Promise<void> {
-  const live = await liveJson(
+  const live = await liveText(
     "GET",
     `/v1/namespaces/${encodeURIComponent(namespaceName)}/hint_cache_warm`
   );
+  const liveBody = parseJsonObject(live.body, "live warm cache response");
   const mini = parseJsonObject(
-    micropuffer.warmCache(namespaceName),
-    "micropuffer warm cache response"
+    micropuffer.warmCacheResponse(namespaceName),
+    "micropuffer warm cache response envelope"
   );
   expect(mini.status).toBe(live.status);
+  expectJsonParity(liveBody, requireObject(mini.body, "micropuffer warm cache response body"));
 }
 
 async function assertRecallParity(): Promise<void> {
