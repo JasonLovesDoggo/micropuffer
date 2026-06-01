@@ -52,6 +52,7 @@ Sources checked:
 - `GET /v1/namespaces/:namespace/metadata`, schema-shape parity only
 - `GET /v1/namespaces/:namespace/schema`, schema-shape parity only
 - `POST /v1/namespaces/:namespace/schema`, schema-shape parity only
+  - unknown schema option keys are ignored when `type` is present
 - `GET /v1/namespaces/:namespace/hint_cache_warm`, status parity only
 - exact status/body parity for include/exclude projection validation
 - exact status/body parity for selected Serde-style query validation failures
@@ -94,3 +95,4 @@ Sources checked:
 - Ungrouped aggregation rejects `top_k`; grouped aggregation defaults when `top_k` is omitted.
 - Live aggregate queries reject the `limit` field before execution; micropuffer rejects it with the same stable field name but does not reproduce Serde's byte-offset wording.
 - The query docs imply multiple `aggregate_by` labels can be supplied, but live turbopuffer currently rejects multiple aggregate functions with `💔 aggregate_by currently requires exactly one function`.
+- Live schema updates require `type` for object definitions, but ignore unknown option keys when `type` is present.
