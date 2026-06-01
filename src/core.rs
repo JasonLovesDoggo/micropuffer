@@ -4864,6 +4864,7 @@ fn query_aggregations(
 ) -> Result<Value, QueryError> {
     let aggregations = as_object(aggregate_by, "aggregate_by")?;
     validate_single_aggregate(aggregations)?;
+    validate_aggregate_request_shape(request)?;
     let filters = request.get("filters");
     let count_labels = count_aggregate_labels(aggregations)?;
     if let Some(labels) = &count_labels {
@@ -4927,6 +4928,20 @@ fn validate_single_aggregate(aggregations: &Map<String, Value>) -> Result<(), Qu
     ))
 }
 
+fn validate_aggregate_request_shape(request: &Map<String, Value>) -> Result<(), QueryError> {
+    if request.contains_key("limit") {
+        return Err(QueryError::new(
+            "unknown field `limit`, expected one of `aggregate_by`, `filters`, `group_by`, `top_k`",
+        ));
+    }
+    if !request.contains_key("group_by") && request.contains_key("top_k") {
+        return Err(QueryError::new(
+            "💔 top_k is not supported in aggregation queries without group_by",
+        ));
+    }
+    Ok(())
+}
+
 fn count_aggregate_labels(
     aggregations: &Map<String, Value>,
 ) -> Result<Option<Vec<String>>, QueryError> {
@@ -4957,16 +4972,12 @@ fn query_grouped_count_aggregations(
     let [Value::String(attribute)] = group_exprs.as_slice() else {
         return Ok(None);
     };
-    let limit = parse_limit(request)?;
+    let limit = parse_aggregate_group_limit(request)?;
     if candidate_indexes.is_none()
         && let Some(entries) = group_count_index(namespace, attribute)
     {
         return Ok(Some(grouped_count_response(
-            namespace,
-            attribute,
-            labels,
-            entries,
-            limit.total,
+            namespace, attribute, labels, entries, limit,
         )));
     }
     let mut groups: HashMap<BorrowedScalarKey<'_>, (Value, usize)> = HashMap::new();
@@ -4992,11 +5003,7 @@ fn query_grouped_count_aggregations(
         .map(|(value, count)| GroupCountEntry { value, count })
         .collect::<Vec<_>>();
     Ok(Some(grouped_count_response(
-        namespace,
-        attribute,
-        labels,
-        entries,
-        limit.total,
+        namespace, attribute, labels, entries, limit,
     )))
 }
 
@@ -5053,7 +5060,7 @@ fn query_grouped_aggregations(
     documents: &[&Document],
 ) -> Result<Value, QueryError> {
     let group_exprs = as_array(group_by, "group_by")?;
-    let limit = parse_limit(request)?;
+    let limit = parse_aggregate_group_limit(request)?;
     let mut groups: BTreeMap<String, (Map<String, Value>, Vec<&Document>)> = BTreeMap::new();
     for document in documents {
         for group_key in group_keys(document, group_exprs)? {
@@ -5066,7 +5073,7 @@ fn query_grouped_aggregations(
         }
     }
     let mut rows = Vec::new();
-    for (_, (mut group_key, docs)) in groups.into_iter().take(limit.total) {
+    for (_, (mut group_key, docs)) in groups.into_iter().take(limit) {
         for (label, aggregate) in aggregations {
             group_key.insert(label.clone(), evaluate_aggregate(aggregate, &docs)?);
         }
@@ -5076,6 +5083,14 @@ fn query_grouped_aggregations(
         json!({ "aggregation_groups": rows }),
         namespace,
     ))
+}
+
+fn parse_aggregate_group_limit(request: &Map<String, Value>) -> Result<usize, QueryError> {
+    request
+        .get("top_k")
+        .map(|top_k| parse_positive_usize(top_k, "top_k"))
+        .transpose()
+        .map(|limit| limit.unwrap_or(10))
 }
 
 fn group_keys(

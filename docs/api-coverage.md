@@ -37,6 +37,7 @@ Sources checked:
   - ungrouped count aggregation
   - ungrouped sum aggregation
   - grouped count aggregation
+  - grouped aggregation default `top_k`
   - multi-query
 - `POST /v1/namespaces/:namespace/_debug/recall`, response-shape parity only
 - `POST /v2/namespaces/:namespace/explain_query`, local shape only; live returned `400` for the temp namespace/index state
@@ -80,5 +81,6 @@ Sources checked:
 
 - OpenAPI allows `include_attributes: false`, but live turbopuffer currently rejects it with `include_attributes must be true or an array`.
 - OpenAPI lists BM25 array-token variants, but live turbopuffer currently rejects `["text", "BM25", ["quick", "fish"]]`.
-- Ungrouped aggregation rejects `top_k`; grouped aggregation requires a top-k style limit.
+- Ungrouped aggregation rejects `top_k`; grouped aggregation defaults when `top_k` is omitted.
+- Live aggregate queries reject the `limit` field before execution; micropuffer rejects it with the same stable field name but does not reproduce Serde's byte-offset wording.
 - The query docs imply multiple `aggregate_by` labels can be supplied, but live turbopuffer currently rejects multiple aggregate functions with `💔 aggregate_by currently requires exactly one function`.
