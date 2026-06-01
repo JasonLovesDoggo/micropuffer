@@ -2610,6 +2610,22 @@ fn micropuffer_lists_copies_and_deletes_namespaces() {
         .unwrap();
     assert_eq!(empty_page["namespaces"], json!([]));
     assert_eq!(empty_page["next_cursor"], Value::Null);
+    let empty_cursor = STANDARD_NO_PAD.encode("{}");
+    let empty_cursor_page = clone
+        .list_namespaces(Some("demo"), Some(&empty_cursor), 1)
+        .unwrap();
+    assert_eq!(
+        empty_cursor_page["namespaces"],
+        json!([{"id": "demo-copy"}])
+    );
+    let invalid_cursor = clone
+        .list_namespaces(Some("demo"), Some("bad"), 1)
+        .unwrap_err();
+    assert_eq!(invalid_cursor.status_code(), 500);
+    assert_eq!(
+        invalid_cursor.to_string(),
+        "🐡 Unknown error, if this persists, please contact support!! We'll be happy to help :)"
+    );
     let zero_page_size = clone.list_namespaces(Some("demo"), None, 0).unwrap_err();
     assert_eq!(zero_page_size.status_code(), 400);
     assert_eq!(
