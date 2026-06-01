@@ -1953,7 +1953,12 @@ fn normalize_metadata_schema_definition(
             json!({ "distance_metric": namespace.distance_metric }),
         );
     } else if attribute != "id" && !config.contains_key("filterable") {
-        config.insert("filterable".to_string(), Value::Bool(true));
+        let filterable = if matches!(definition, Value::String(_)) {
+            Value::Bool(true)
+        } else {
+            Value::Bool(false)
+        };
+        config.insert("filterable".to_string(), filterable);
     }
     if let Some(full_text_search) = config.get("full_text_search").cloned()
         && full_text_search != Value::Bool(false)
