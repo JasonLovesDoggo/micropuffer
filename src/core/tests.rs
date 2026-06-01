@@ -524,6 +524,203 @@ fn base64_vector_encoding_applies_to_included_vectors() {
 }
 
 #[test]
+fn vector_attributes_remain_visible_to_generic_filters() {
+    let cases = [
+        (json!(["vector", "Eq", [1.0, 1.0]]), vec![2]),
+        (json!(["vector", "NotEq", [0.0, 0.0]]), vec![2, 3]),
+        (
+            json!(["vector", "In", [[0.0, 0.0], [1.0, 1.0]]]),
+            vec![1, 2],
+        ),
+        (
+            json!(["vector", "NotIn", [[0.0, 0.0], [2.0, 2.0]]]),
+            vec![2],
+        ),
+        (json!(["vector", "Contains", 1.0]), vec![2]),
+        (json!(["vector", "NotContains", 9.0]), vec![1, 2, 3]),
+        (json!(["vector", "ContainsAny", [9.0, 1.0]]), vec![2]),
+        (
+            json!(["vector", "NotContainsAny", [9.0, 8.0]]),
+            vec![1, 2, 3],
+        ),
+    ];
+
+    for (filter, expected_ids) in cases {
+        let response = query_namespace(
+            &namespace(),
+            &json!({
+                "rank_by": ["id", "asc"],
+                "filters": filter,
+                "limit": 10,
+                "include_attributes": ["vector"]
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            rows(&response)
+                .iter()
+                .map(|row| row["id"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            expected_ids
+        );
+        for row in rows(&response) {
+            assert!(row.get("vector").is_some());
+        }
+    }
+}
+
+#[test]
+fn vector_attributes_remain_visible_to_write_conditions() {
+    let mut clone = Micropuffer::new();
+    clone
+        .write(
+            "vector-conditions",
+            &json!({
+                "upsert_rows": [
+                    {"id": 1, "vector": [1.0, 0.0], "title": "original"},
+                    {"id": 2, "vector": [2.0, 0.0], "title": "delete-me"}
+                ]
+            }),
+        )
+        .unwrap();
+
+    let blocked_same_vector = clone
+        .write(
+            "vector-conditions",
+            &json!({
+                "upsert_rows": [
+                    {"id": 1, "vector": [1.0, 0.0], "title": "should not update"}
+                ],
+                "upsert_condition": ["vector", "NotEq", {"$ref_new": "vector"}]
+            }),
+        )
+        .unwrap();
+    assert_eq!(blocked_same_vector["rows_affected"], 0);
+
+    let changed_vector = clone
+        .write(
+            "vector-conditions",
+            &json!({
+                "upsert_rows": [
+                    {"id": 1, "vector": [0.0, 1.0], "title": "updated"}
+                ],
+                "upsert_condition": ["vector", "NotEq", {"$ref_new": "vector"}]
+            }),
+        )
+        .unwrap();
+    assert_eq!(changed_vector["rows_affected"], 1);
+
+    let deleted = clone
+        .write(
+            "vector-conditions",
+            &json!({
+                "deletes": [2],
+                "delete_condition": ["vector", "Eq", [2.0, 0.0]]
+            }),
+        )
+        .unwrap();
+    assert_eq!(deleted["rows_affected"], 1);
+
+    let response = clone
+        .query(
+            "vector-conditions",
+            &json!({
+                "rank_by": ["id", "asc"],
+                "limit": 10,
+                "include_attributes": true
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        rows(&response),
+        &[json!({"id": 1, "vector": [0.0, 1.0], "title": "updated"})]
+    );
+}
+
+#[test]
+fn vector_projection_export_and_roundtrip_keep_base64_and_typed_cache() {
+    let mut clone = Micropuffer::new();
+    clone
+        .write(
+            "vector-projection",
+            &json!({
+                "upsert_rows": [
+                    {"id": 1, "vector": [1.0, 0.0], "title": "one"},
+                    {"id": 2, "vector": [0.0, 1.0], "title": "two"}
+                ]
+            }),
+        )
+        .unwrap();
+    let expected_vector = STANDARD.encode([1.0_f32.to_le_bytes(), 0.0_f32.to_le_bytes()].concat());
+
+    let query_include = clone
+        .query(
+            "vector-projection",
+            &json!({
+                "rank_by": ["vector", "ANN", [1.0, 0.0]],
+                "limit": 1,
+                "include_attributes": ["vector", "title"],
+                "vector_encoding": "base64"
+            }),
+        )
+        .unwrap();
+    assert_eq!(rows(&query_include)[0]["vector"], expected_vector);
+    assert_eq!(rows(&query_include)[0]["title"], "one");
+
+    let query_exclude = clone
+        .query(
+            "vector-projection",
+            &json!({
+                "rank_by": ["id", "asc"],
+                "limit": 1,
+                "exclude_attributes": ["title"],
+                "vector_encoding": "base64"
+            }),
+        )
+        .unwrap();
+    assert_eq!(rows(&query_exclude)[0]["vector"], expected_vector);
+    assert!(rows(&query_exclude)[0].get("title").is_none());
+
+    let export = clone
+        .export_namespace(
+            "vector-projection",
+            &json!({
+                "filters": ["vector", "Eq", [1.0, 0.0]],
+                "include_attributes": ["vector"],
+                "limit": 10,
+                "vector_encoding": "base64"
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        rows(&export),
+        &[json!({"id": 1, "vector": expected_vector})]
+    );
+
+    let serialized = serde_json::to_value(clone.store()).unwrap();
+    let imported: MiniStore = serde_json::from_value(serialized).unwrap();
+    let imported_doc = &imported.namespace("vector-projection").unwrap().documents[0];
+    assert_eq!(imported_doc.attributes["vector"], json!([1.0, 0.0]));
+    assert_eq!(
+        imported_doc.typed.dense_vector("vector").unwrap(),
+        &[1.0, 0.0]
+    );
+    assert_eq!(
+        query_store(
+            &imported,
+            "vector-projection",
+            &json!({
+                "rank_by": ["vector", "ANN", [1.0, 0.0]],
+                "limit": 1,
+                "include_attributes": ["title"]
+            }),
+        )
+        .unwrap()["rows"][0]["id"],
+        1
+    );
+}
+
+#[test]
 fn query_store_finds_namespace_by_name() {
     let store = MiniStore {
         namespaces: vec![namespace()],
@@ -548,7 +745,7 @@ fn documents_flatten_unknown_attributes() {
 }
 
 #[test]
-fn document_typed_dense_vectors_are_cached_and_skipped_by_json() {
+fn document_typed_dense_vectors_are_cached_as_a_sidecar() {
     let document: Document = serde_json::from_value(json!({
         "id": "typed",
         "vector": [1.0, 2.0, 3.0],
@@ -561,6 +758,7 @@ fn document_typed_dense_vectors_are_cached_and_skipped_by_json() {
         document.typed.dense_vector("vector").unwrap(),
         &[1.0, 2.0, 3.0]
     );
+    assert_eq!(document.attributes["vector"], json!([1.0, 2.0, 3.0]));
 
     let serialized = serde_json::to_value(&document).unwrap();
     assert_eq!(serialized["vector"], json!([1.0, 2.0, 3.0]));

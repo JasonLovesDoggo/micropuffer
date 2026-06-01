@@ -226,11 +226,8 @@ pub struct TypedDocumentFields {
 }
 
 impl Document {
-    pub fn new(id: Value, mut attributes: Map<String, Value>) -> Self {
+    pub fn new(id: Value, attributes: Map<String, Value>) -> Self {
         let typed = TypedDocumentFields::from_attributes(&attributes);
-        if typed.vector.is_some() {
-            attributes.remove("vector");
-        }
         Self {
             id,
             attributes,
@@ -240,11 +237,7 @@ impl Document {
 
     fn set_attribute(&mut self, key: String, value: Value) {
         self.typed.set_attribute(&key, &value);
-        if key == "vector" && self.typed.vector.is_some() {
-            self.attributes.remove(&key);
-        } else {
-            self.attributes.insert(key, value);
-        }
+        self.attributes.insert(key, value);
     }
 }
 
