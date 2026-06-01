@@ -816,6 +816,77 @@ async function assertErrorParity(): Promise<void> {
   const miniVectorEncoding = miniQueryError(namespaceName, invalidVectorEncodingQuery);
   expectErrorParity(miniVectorEncoding, liveVectorEncoding);
 
+  const invalidRankByShapeQuery: JsonObject = {
+    rank_by: "bad",
+    limit: 1
+  };
+  const liveInvalidRankByShape = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(namespaceName)}/query`,
+    invalidRankByShapeQuery
+  );
+  const miniInvalidRankByShape = miniQueryError(namespaceName, invalidRankByShapeQuery);
+  expectErrorParity(miniInvalidRankByShape, liveInvalidRankByShape);
+
+  const emptyRankByQuery: JsonObject = {
+    rank_by: [],
+    limit: 1
+  };
+  const liveEmptyRankBy = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(namespaceName)}/query`,
+    emptyRankByQuery
+  );
+  const miniEmptyRankBy = miniQueryError(namespaceName, emptyRankByQuery);
+  expectErrorParity(miniEmptyRankBy, liveEmptyRankBy);
+
+  const invalidRankByOperatorQuery: JsonObject = {
+    rank_by: ["vector", "BAD", [1, 0]],
+    limit: 1
+  };
+  const liveInvalidRankByOperator = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(namespaceName)}/query`,
+    invalidRankByOperatorQuery
+  );
+  const miniInvalidRankByOperator = miniQueryError(namespaceName, invalidRankByOperatorQuery);
+  expectErrorParity(miniInvalidRankByOperator, liveInvalidRankByOperator);
+
+  const missingLimitQuery: JsonObject = {
+    rank_by: ["id", "asc"]
+  };
+  const liveMissingLimit = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(namespaceName)}/query`,
+    missingLimitQuery
+  );
+  const miniMissingLimit = miniQueryError(namespaceName, missingLimitQuery);
+  expectErrorParity(miniMissingLimit, liveMissingLimit);
+
+  const zeroLimitQuery: JsonObject = {
+    rank_by: ["id", "asc"],
+    limit: 0
+  };
+  const liveZeroLimit = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(namespaceName)}/query`,
+    zeroLimitQuery
+  );
+  const miniZeroLimit = miniQueryError(namespaceName, zeroLimitQuery);
+  expectErrorParity(miniZeroLimit, liveZeroLimit);
+
+  const invalidLimitShapeQuery: JsonObject = {
+    rank_by: ["id", "asc"],
+    limit: "bad"
+  };
+  const liveInvalidLimitShape = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(namespaceName)}/query`,
+    invalidLimitShapeQuery
+  );
+  const miniInvalidLimitShape = miniQueryError(namespaceName, invalidLimitShapeQuery);
+  expectErrorParity(miniInvalidLimitShape, liveInvalidLimitShape);
+
   const invalidConsistencyLevelQuery: JsonObject = {
     rank_by: ["id", "asc"],
     limit: 1,

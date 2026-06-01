@@ -69,6 +69,7 @@ Sources checked:
 - `GET /v1/namespaces/:namespace/hint_cache_warm`, exact body and `202` status parity
 - path namespace validation for invalid characters and names over 128 characters
 - exact status/body parity for include/exclude projection validation
+- exact status/body parity for selected malformed `rank_by` and `limit` validation failures
 - exact status/body parity for selected consistency validation failures
 - exact status/body parity for selected recall validation failures
 - exact status/body parity for selected Serde-style query validation failures

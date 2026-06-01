@@ -2925,6 +2925,81 @@ fn query_validation_errors_carry_http_status_codes() {
         "Failed to deserialize the JSON body into the target type: vector_encoding: unknown variant `bad`, expected `float` or `base64`"
     );
 
+    let invalid_rank_by_shape = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": "bad",
+            "limit": 1
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(invalid_rank_by_shape.status_code(), 422);
+    assert_eq!(
+        invalid_rank_by_shape.to_string(),
+        "Failed to deserialize the JSON body into the target type: data did not match any variant of enum a valid variant of RankInput at line 1 column 27"
+    );
+
+    let empty_rank_by = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": [],
+            "limit": 1
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(empty_rank_by.status_code(), 400);
+    assert_eq!(empty_rank_by.to_string(), "💔 rank_by cannot be empty");
+
+    let invalid_rank_by_operator = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["vector", "BAD", [1.0, 0.0]],
+            "limit": 1
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(invalid_rank_by_operator.status_code(), 422);
+    assert_eq!(
+        invalid_rank_by_operator.to_string(),
+        "Failed to deserialize the JSON body into the target type: data did not match any variant of enum a valid variant of RankInput at line 1 column 44"
+    );
+
+    let missing_limit =
+        query_namespace(&namespace, &json!({"rank_by": ["id", "asc"]})).unwrap_err();
+    assert_eq!(missing_limit.status_code(), 400);
+    assert_eq!(
+        missing_limit.to_string(),
+        "💔 rank_by queries must specify top_k or limit"
+    );
+
+    let zero_limit = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["id", "asc"],
+            "limit": 0
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(zero_limit.status_code(), 400);
+    assert_eq!(
+        zero_limit.to_string(),
+        "💔 top_k must be between 1 and 10000"
+    );
+
+    let invalid_limit_shape = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["id", "asc"],
+            "limit": "bad"
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(invalid_limit_shape.status_code(), 422);
+    assert_eq!(
+        invalid_limit_shape.to_string(),
+        "Failed to deserialize the JSON body into the target type: data did not match any variant of untagged enum LimitInput at line 1 column 38"
+    );
+
     let invalid_consistency_level = query_namespace(
         &namespace,
         &json!({
