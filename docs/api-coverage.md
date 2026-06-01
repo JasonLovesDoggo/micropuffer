@@ -69,6 +69,7 @@ Sources checked:
 - path namespace validation for invalid characters and names over 128 characters
 - exact status/body parity for include/exclude projection validation
 - exact status/body parity for selected consistency validation failures
+- exact status/body parity for selected recall validation failures
 - exact status/body parity for selected Serde-style query validation failures
 - exact status/body parity for missing-namespace query failures
 - exact status/body parity for selected write validation failures

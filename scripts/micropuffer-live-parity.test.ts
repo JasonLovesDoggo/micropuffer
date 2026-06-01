@@ -842,6 +842,25 @@ async function assertErrorParity(): Promise<void> {
   const miniInvalidConsistencyLevelType = miniQueryError(namespaceName, invalidConsistencyLevelTypeQuery);
   expectErrorParity(miniInvalidConsistencyLevelType, liveInvalidConsistencyLevelType);
 
+  const invalidRecallRequests: JsonObject[] = [
+    { num: "bad", top_k: 1 },
+    { num: 0, top_k: 1 },
+    { num: 1, top_k: "bad" },
+    { num: 1, top_k: 0 },
+    { num: 1, top_k: 1, filters: "bad" },
+    { num: 1, top_k: 1, include_ground_truth: "bad" }
+  ];
+  for (const invalidRecallRequest of invalidRecallRequests) {
+    expectErrorParity(
+      miniRecallError(namespaceName, invalidRecallRequest),
+      await liveError(
+        "POST",
+        `/v1/namespaces/${encodeURIComponent(namespaceName)}/_debug/recall`,
+        invalidRecallRequest
+      )
+    );
+  }
+
   const missingNamespace = `${namespaceName}-missing`;
   const missingQuery: JsonObject = {
     rank_by: ["id", "asc"],
@@ -1489,6 +1508,14 @@ function miniListNamespacesTextError(request: JsonObject): TextErrorResult {
     throw new Error("Expected micropuffer list namespaces to fail.");
   }
   return { status, body };
+}
+
+function miniRecallError(namespace: string, request: JsonObject): ErrorResult {
+  const response = parseJsonObject(
+    micropuffer.recallResponse(namespace, JSON.stringify(request)),
+    "micropuffer recall response envelope"
+  );
+  return errorResultFromEnvelope(response, "recall");
 }
 
 function miniQueryError(namespace: string, request: JsonObject): ErrorResult {
