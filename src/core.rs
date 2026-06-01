@@ -1317,6 +1317,7 @@ pub fn write_store(
 
 pub fn query_namespace(namespace: &Namespace, request: &Value) -> Result<Value, QueryError> {
     let object = as_object(request, "query request")?;
+    validate_consistency_shape(object)?;
     let options = QueryOptions {
         vector_encoding: parse_vector_encoding(object.get("vector_encoding"))?,
     };
@@ -1343,6 +1344,7 @@ fn query_single(
     options: &QueryOptions,
 ) -> Result<Value, QueryError> {
     let object = as_object(request, "query request")?;
+    validate_consistency_shape(object)?;
     if object.contains_key("rank_by") && object.contains_key("aggregate_by") {
         return Err(QueryError::new(
             "rank_by and aggregate_by cannot be specified together.",
@@ -1354,6 +1356,7 @@ fn query_single(
         ));
     }
     validate_projection_shape(object)?;
+    validate_included_attributes(namespace, object)?;
     if let Some(aggregate_by) = object.get("aggregate_by") {
         if object.contains_key("include_attributes") {
             return Err(QueryError::new(
@@ -3151,6 +3154,41 @@ fn parse_vector_encoding(value: Option<&Value>) -> Result<VectorEncoding, QueryE
     }
 }
 
+fn validate_consistency_shape(object: &Map<String, Value>) -> Result<(), QueryError> {
+    let Some(consistency) = object.get("consistency") else {
+        return Ok(());
+    };
+    let Some(consistency) = consistency.as_object() else {
+        return Err(QueryError::unprocessable(format!(
+            "Failed to deserialize the JSON body into the target type: consistency: invalid type: {}, expected struct Consistency",
+            serde_consistency_type_name(consistency)
+        )));
+    };
+    let Some(level) = consistency.get("level") else {
+        return Err(QueryError::unprocessable(
+            "Failed to deserialize the JSON body into the target type: consistency: missing field `level`",
+        ));
+    };
+    let Some(level) = level.as_str() else {
+        return Err(QueryError::new(
+            "Failed to parse the request body as JSON: consistency.level: expected value",
+        ));
+    };
+    match level {
+        "strong" | "eventual" => Ok(()),
+        level => Err(QueryError::unprocessable(format!(
+            "Failed to deserialize the JSON body into the target type: consistency.level: unknown variant `{level}`, expected `strong` or `eventual`"
+        ))),
+    }
+}
+
+fn serde_consistency_type_name(value: &Value) -> String {
+    match value {
+        Value::String(value) => format!("string \"{value}\""),
+        _ => serde_type_name(value),
+    }
+}
+
 fn validate_projection_shape(object: &Map<String, Value>) -> Result<(), QueryError> {
     if let Some(include_attributes) = object.get("include_attributes") {
         match include_attributes {
@@ -3182,6 +3220,25 @@ fn validate_projection_shape(object: &Map<String, Value>) -> Result<(), QueryErr
             return Err(QueryError::unprocessable(format!(
                 "Failed to deserialize the JSON body into the target type: invalid type: {}, expected a string",
                 serde_type_name(invalid)
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_included_attributes(
+    namespace: &Namespace,
+    object: &Map<String, Value>,
+) -> Result<(), QueryError> {
+    let Some(Value::Array(attributes)) = object.get("include_attributes") else {
+        return Ok(());
+    };
+    let schema = schema_with_id(namespace);
+    for attribute in attributes {
+        let name = as_string(attribute, "include_attributes item")?;
+        if !schema.contains_key(name) {
+            return Err(QueryError::new(format!(
+                "💔 attribute \"{name}\" not found in schema, cannot be part of `include_attributes`. consider passing `include_attributes=True` to return all attribute data instead"
             )));
         }
     }
