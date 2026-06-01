@@ -4002,7 +4002,7 @@ fn apply_limit<'a>(
         RankKind::AttributeOrder { .. } | RankKind::MultiAttributeOrder { .. }
     ) {
         return Err(QueryError::new(
-            "limit.per is only supported for order by attribute queries.",
+            "💔 `limit.per` is only supported when ranking by an attribute",
         ));
     }
     sort_ranked_documents(&mut ranked, kind);
