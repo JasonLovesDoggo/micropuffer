@@ -20,7 +20,7 @@ const httpResponse = engine.queryResponse("local", JSON.stringify({ rank_by: ["i
 const storeJson = engine.exportStore();
 ```
 
-`query` throws a string error for the raw WASM API. `queryResponse` returns a JSON string with `{ status, body }`, which is better for HTTP mocks that need turbopuffer-style error status and body parity.
+Raw methods like `query` and `write` throw string errors through the WASM API. The matching `*Response` methods return JSON strings with `{ status, body }`, which is better for HTTP mocks that need turbopuffer-style error status and body parity.
 
 The npm package ships generated `wasm-bindgen` output from `pkg/`. Generated artifacts are built during `prepack` and in the publish workflow, but are not committed to git.
 
