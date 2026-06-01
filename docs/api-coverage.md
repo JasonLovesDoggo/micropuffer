@@ -96,6 +96,7 @@ Sources checked:
 - namespace delete helper
 - WASM `*Response` helpers for HTTP-style status/body mock envelopes
 - `Saturate`, `Decay`, and `Dist` rank operators
+- current documented filter-write partial limits: 500k rows for `patch_by_filter`, 5M rows for `delete_by_filter`
 - recall ground-truth projection
 - explain-query plan text
 
