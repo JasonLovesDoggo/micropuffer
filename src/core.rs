@@ -66,7 +66,7 @@ impl Micropuffer {
         self.store
             .namespaces
             .retain(|namespace| namespace.name != namespace_name);
-        Ok(json!({}))
+        Ok(json!({ "status": "OK" }))
     }
 
     pub fn list_namespaces(
@@ -2114,6 +2114,11 @@ impl WriteSummary {
         let rows_patched = self.patched_ids.len();
         let rows_deleted = self.deleted_ids.len();
         let mut response = Map::new();
+        response.insert("status".to_string(), Value::String("OK".to_string()));
+        response.insert(
+            "message".to_string(),
+            Value::String("documents committed successfully".to_string()),
+        );
         response.insert(
             "rows_affected".to_string(),
             Value::Number(Number::from(rows_upserted + rows_patched + rows_deleted)),
@@ -2271,6 +2276,8 @@ fn copy_namespace(
             .set_cached_logical_bytes(bytes_written);
     }
     Ok(json!({
+        "status": "OK",
+        "message": "namespace cloned successfully",
         "rows_affected": rows_affected,
         "rows_upserted": rows_affected,
         "rows_remaining": false,
