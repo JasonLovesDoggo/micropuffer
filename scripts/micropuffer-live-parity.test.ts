@@ -491,6 +491,17 @@ async function assertListNamespaceParity(): Promise<void> {
   );
   expectJsonParity(liveEmptyPage, miniEmptyPage);
 
+  const emptyCursor = Buffer.from("{}").toString("base64url");
+  const liveEmptyCursorPage = await liveJson(
+    "GET",
+    `/v1/namespaces?prefix=${encodeURIComponent(namespaceName)}&page_size=1&cursor=${encodeURIComponent(emptyCursor)}`
+  );
+  const miniEmptyCursorPage = parseJsonObject(
+    micropuffer.listNamespaces(JSON.stringify({ prefix: namespaceName, page_size: "1", cursor: emptyCursor })),
+    "micropuffer list empty cursor page response"
+  );
+  expectJsonParity(liveEmptyCursorPage, miniEmptyCursorPage);
+
   const liveZeroPageSize = await liveError(
     "GET",
     `/v1/namespaces?prefix=${encodeURIComponent(namespaceName)}&page_size=0`
@@ -504,6 +515,17 @@ async function assertListNamespaceParity(): Promise<void> {
   );
   const miniBadPageSize = miniListNamespacesTextError({ prefix: namespaceName, page_size: "bad" });
   expectTextErrorParity(miniBadPageSize, liveBadPageSize);
+
+  const liveBadCursor = await liveError(
+    "GET",
+    `/v1/namespaces?prefix=${encodeURIComponent(namespaceName)}&page_size=1&cursor=bad`
+  );
+  const miniBadCursor = miniListNamespacesJsonError({
+    prefix: namespaceName,
+    page_size: "1",
+    cursor: "bad"
+  });
+  expectErrorParity(miniBadCursor, liveBadCursor);
 }
 
 async function assertMetadataParity(): Promise<void> {
