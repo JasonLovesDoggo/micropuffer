@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Mutex, MutexGuard};
 use unicode_segmentation::UnicodeSegmentation;
 
-const PATCH_BY_FILTER_LIMIT: usize = 500_000;
+const PATCH_BY_FILTER_LIMIT: usize = 50_000;
 const DELETE_BY_FILTER_LIMIT: usize = 5_000_000;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

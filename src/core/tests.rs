@@ -2476,7 +2476,7 @@ fn copy_replaces_existing_empty_namespace_logical_bytes_cache() {
 
 #[test]
 fn patch_by_filter_respects_partial_limit_and_rows_remaining() {
-    assert_eq!(PATCH_BY_FILTER_LIMIT, 500_000);
+    assert_eq!(PATCH_BY_FILTER_LIMIT, 50_000);
     const TEST_LIMIT: usize = 3;
     let mut documents = Vec::with_capacity(TEST_LIMIT + 1);
     for index in 0..=TEST_LIMIT {
