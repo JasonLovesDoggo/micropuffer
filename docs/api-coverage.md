@@ -23,6 +23,7 @@ Sources checked:
   - `return_affected_ids`
   - `copy_from_namespace`
   - `distance_metric` required for first vector writes
+  - top-level `distance_metric` requirement when schema `ann.distance_metric` is present
   - distance metric mismatch rejection
   - scalar namespace rejection when adding a vector later
 - `POST /v2/namespaces/:namespace/query`

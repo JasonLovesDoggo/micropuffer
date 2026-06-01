@@ -2546,6 +2546,26 @@ fn vector_writes_require_live_distance_metric_rules() {
         "💔 distance_metric must be specified for write to namespace with a vector"
     );
 
+    let schema_ann_metric = clone
+        .write(
+            "metric-required",
+            &json!({
+                "schema": {
+                    "vector": {
+                        "type": "[2]f32",
+                        "ann": {"distance_metric": "euclidean"}
+                    }
+                },
+                "upsert_rows": [{"id": 1, "vector": [1.0, 0.0]}]
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(schema_ann_metric.status_code(), 400);
+    assert_eq!(
+        schema_ann_metric.to_string(),
+        "💔 `distance_metric` must be specified as a field at the top level of the write request, not in the `ann` configuration for an attribute"
+    );
+
     let invalid_metric = clone
         .write(
             "metric-invalid",
