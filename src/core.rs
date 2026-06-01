@@ -2333,6 +2333,7 @@ fn validate_pre_tokenized_config(
     config.remove_stopwords = false;
     config.stemming = false;
     config.case_sensitive = true;
+    config.max_token_length = usize::MAX;
     Ok(())
 }
 
@@ -2422,16 +2423,26 @@ fn fts_config_for_field(namespace: &Namespace, field: &str) -> FtsConfig {
 }
 
 fn fts_config_schema_value(config: &FtsConfig) -> Value {
+    let language = if config.tokenizer == Tokenizer::PreTokenizedArray {
+        Value::Null
+    } else {
+        Value::String(fts_language_name(config.language).to_string())
+    };
+    let max_token_length = if config.tokenizer == Tokenizer::PreTokenizedArray {
+        Value::Null
+    } else {
+        Value::Number(Number::from(config.max_token_length))
+    };
     json!({
         "k1": config.k1(),
         "b": config.b(),
         "k3": config.k3(),
-        "language": fts_language_name(config.language),
+        "language": language,
         "stemming": config.stemming,
         "remove_stopwords": config.remove_stopwords,
         "ascii_folding": config.ascii_folding,
         "case_sensitive": config.case_sensitive,
-        "max_token_length": config.max_token_length,
+        "max_token_length": max_token_length,
         "tokenizer": tokenizer_name(config.tokenizer),
     })
 }
@@ -5606,6 +5617,8 @@ fn eval_filter_with_schema(
         "Regex" => regex_match(actual, expected),
         "NotRegex" => Ok(!regex_match(actual, expected)?),
         "ContainsAllTokens" => token_filter(
+            attr,
+            op,
             actual,
             expected,
             options,
@@ -5613,6 +5626,8 @@ fn eval_filter_with_schema(
             fts_config_from_schema(schema, attr),
         ),
         "ContainsAnyToken" => token_filter(
+            attr,
+            op,
             actual,
             expected,
             options,
@@ -5620,6 +5635,8 @@ fn eval_filter_with_schema(
             fts_config_from_schema(schema, attr),
         ),
         "ContainsTokenSequence" => token_filter(
+            attr,
+            op,
             actual,
             expected,
             options,
@@ -5754,12 +5771,27 @@ fn regex_match(actual: &Value, pattern: &Value) -> Result<bool, QueryError> {
 }
 
 fn token_filter(
+    attr: &str,
+    op: &str,
     actual: &Value,
     expected: &Value,
     options: Option<&Value>,
     mode: TokenMode,
     config: FtsConfig,
 ) -> Result<bool, QueryError> {
+    if config.tokenizer != Tokenizer::PreTokenizedArray && expected.is_array() {
+        return Err(QueryError::new(format!(
+            "filter error in key `{attr}`: type mismatch, {op} expects string, but got '{}'",
+            format_bm25_query_input(expected)
+        )));
+    }
+    if config.tokenizer == Tokenizer::PreTokenizedArray
+        && let Some(text) = expected.as_str()
+    {
+        return Err(QueryError::new(format!(
+            "filter error in key `{attr}`: type mismatch, {op} expects []string, but got '{text}'"
+        )));
+    }
     let query_tokens = query_tokens_with_config(expected, "token query", &config)?;
     if query_tokens.is_empty() {
         return Ok(false);
@@ -5769,26 +5801,24 @@ fn token_filter(
         .and_then(|object| object.get("last_as_prefix"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    Ok(any_string_value(actual, |text| {
-        let tokens = tokenize(text, &config);
-        match mode {
-            TokenMode::All => query_tokens.iter().enumerate().all(|(index, query_token)| {
-                token_present(
-                    &tokens,
-                    query_token,
-                    last_as_prefix && index + 1 == query_tokens.len(),
-                )
-            }),
-            TokenMode::Any => query_tokens.iter().enumerate().any(|(index, query_token)| {
-                token_present(
-                    &tokens,
-                    query_token,
-                    last_as_prefix && index + 1 == query_tokens.len(),
-                )
-            }),
-            TokenMode::Sequence => contains_token_sequence(&tokens, &query_tokens, last_as_prefix),
-        }
-    }))
+    let tokens = value_tokens(actual, &config);
+    Ok(match mode {
+        TokenMode::All => query_tokens.iter().enumerate().all(|(index, query_token)| {
+            token_present(
+                &tokens,
+                query_token,
+                last_as_prefix && index + 1 == query_tokens.len(),
+            )
+        }),
+        TokenMode::Any => query_tokens.iter().enumerate().any(|(index, query_token)| {
+            token_present(
+                &tokens,
+                query_token,
+                last_as_prefix && index + 1 == query_tokens.len(),
+            )
+        }),
+        TokenMode::Sequence => contains_token_sequence(&tokens, &query_tokens, last_as_prefix),
+    })
 }
 
 fn fuzzy_match(

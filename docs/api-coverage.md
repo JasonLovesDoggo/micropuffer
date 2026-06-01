@@ -25,6 +25,7 @@ Sources checked:
   - `copy_from_namespace`
   - `distance_metric` required for first vector writes
   - top-level `distance_metric` requirement when schema `ann.distance_metric` is present
+  - `disable_backpressure` accepted as a no-op for in-memory writes
   - explicit dense vector schemas must enable `ann`
   - distance metric mismatch rejection
   - scalar namespace rejection when adding a vector later
@@ -51,6 +52,9 @@ Sources checked:
   - base64 dense vector input for writes and ANN queries
   - `consistency.level` validation for `strong` and `eventual`
   - `limit.per` for order-by-attribute queries
+  - `top_k` alias for ranked queries
+  - BM25 `last_as_prefix`
+  - `pre_tokenized_array` BM25 and token filters
   - ungrouped count aggregation
   - ungrouped sum aggregation
   - grouped count aggregation
@@ -72,6 +76,7 @@ Sources checked:
 - path namespace validation for invalid characters and names over 128 characters
 - exact status/body parity for include/exclude projection validation
 - exact status/body parity for selected malformed `rank_by` and `limit` validation failures
+- exact status/body parity for word-tokenized array token filters and pre-tokenized string token filters
 - exact status/body parity for selected consistency validation failures
 - exact status/body parity for selected recall validation failures
 - exact status/body parity for selected Serde-style query validation failures
