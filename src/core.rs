@@ -429,6 +429,7 @@ struct NamespaceQueryIndexes {
     equality: HashMap<String, EqualityAttributeIndex>,
     order: HashMap<OrderIndexKey, Vec<OrderIndexEntry>>,
     group_counts: HashMap<String, GroupCountIndex>,
+    sparse_vectors: HashMap<String, SparseVectorIndex>,
 }
 
 impl NamespaceQueryIndexes {
@@ -436,10 +437,14 @@ impl NamespaceQueryIndexes {
         self.equality.clear();
         self.order.clear();
         self.group_counts.clear();
+        self.sparse_vectors.clear();
     }
 
     fn is_empty(&self) -> bool {
-        self.equality.is_empty() && self.order.is_empty() && self.group_counts.is_empty()
+        self.equality.is_empty()
+            && self.order.is_empty()
+            && self.group_counts.is_empty()
+            && self.sparse_vectors.is_empty()
     }
 }
 
@@ -497,6 +502,17 @@ struct GroupCountIndex {
 struct GroupCountEntry {
     value: Value,
     count: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SparseVectorIndex {
+    postings: HashMap<String, Vec<SparsePosting>>,
+}
+
+#[derive(Debug, Clone)]
+struct SparsePosting {
+    doc_index: usize,
+    value: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -3258,6 +3274,9 @@ fn rank_documents<'a>(
     if let Some(scores) = simple_bm25_scores(rank_plan) {
         return rank_indexed_bm25_documents(namespace, scores, filters);
     }
+    if let Some((attribute, query)) = simple_sparse_query(rank_plan) {
+        return rank_indexed_sparse_documents(namespace, attribute, query, filters);
+    }
 
     let mut ranked = Vec::new();
     let indexed_candidates = filters
@@ -3318,6 +3337,18 @@ fn simple_bm25_scores<'a>(rank_plan: &'a PreparedRankPlan<'_>) -> Option<&'a Pre
     }
 }
 
+fn simple_sparse_query<'a>(
+    rank_plan: &'a PreparedRankPlan<'_>,
+) -> Option<(&'a str, &'a HashMap<String, f64>)> {
+    if !matches!(rank_plan.kind, RankKind::LargerIsBetter) {
+        return None;
+    }
+    match rank_plan.expression.as_ref()? {
+        PreparedRankExpr::SparseDotProduct { attribute, query } => Some((attribute, query)),
+        _ => None,
+    }
+}
+
 fn rank_indexed_bm25_documents<'a>(
     namespace: &'a Namespace,
     scores: &PreparedBm25Scores,
@@ -3325,6 +3356,33 @@ fn rank_indexed_bm25_documents<'a>(
 ) -> Result<Vec<RankedDocument<'a>>, QueryError> {
     let mut ranked = Vec::with_capacity(scores.ranked.len());
     for (doc_index, score) in scores.ranked.iter().copied() {
+        let Some(document) = namespace.documents.get(doc_index) else {
+            continue;
+        };
+        if !filters
+            .map(|filter| eval_filter_with_schema(document, filter, Some(&namespace.schema)))
+            .transpose()?
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        ranked.push(RankedDocument {
+            doc: document,
+            score,
+        });
+    }
+    Ok(ranked)
+}
+
+fn rank_indexed_sparse_documents<'a>(
+    namespace: &'a Namespace,
+    attribute: &str,
+    query: &HashMap<String, f64>,
+    filters: Option<&Value>,
+) -> Result<Vec<RankedDocument<'a>>, QueryError> {
+    let scores = score_indexed_sparse(namespace, attribute, query);
+    let mut ranked = Vec::with_capacity(scores.len());
+    for (doc_index, score) in scores {
         let Some(document) = namespace.documents.get(doc_index) else {
             continue;
         };
@@ -3620,6 +3678,70 @@ fn build_order_index(namespace: &Namespace, key: &OrderIndexKey) -> Vec<OrderInd
     order
 }
 
+fn score_indexed_sparse(
+    namespace: &Namespace,
+    attr: &str,
+    query: &HashMap<String, f64>,
+) -> Vec<(usize, f64)> {
+    let mut indexes = namespace.query_indexes.guard();
+    if !indexes.sparse_vectors.contains_key(attr) {
+        indexes
+            .sparse_vectors
+            .insert(attr.to_string(), build_sparse_vector_index(namespace, attr));
+    }
+    let Some(index) = indexes.sparse_vectors.get(attr) else {
+        return Vec::new();
+    };
+    let mut scores: HashMap<usize, f64> = HashMap::new();
+    for (dimension, query_value) in query {
+        if *query_value == 0.0 {
+            continue;
+        }
+        let Some(postings) = index.postings.get(dimension) else {
+            continue;
+        };
+        for posting in postings {
+            let score = scores.entry(posting.doc_index).or_insert(0.0);
+            *score += posting.value * query_value;
+        }
+    }
+    scores
+        .into_iter()
+        .filter(|(_, score)| *score != 0.0)
+        .collect()
+}
+
+fn build_sparse_vector_index(namespace: &Namespace, attr: &str) -> SparseVectorIndex {
+    let mut index = SparseVectorIndex::default();
+    for (doc_index, document) in namespace.documents.iter().enumerate() {
+        insert_sparse_document_postings(&mut index, doc_index, document_attr(document, attr));
+    }
+    index
+}
+
+fn insert_sparse_document_postings(
+    index: &mut SparseVectorIndex,
+    doc_index: usize,
+    value: Option<&Value>,
+) {
+    let Some(Value::Object(vector)) = value else {
+        return;
+    };
+    for (dimension, value) in vector {
+        let Some(value) = value_as_f64(value) else {
+            continue;
+        };
+        if value == 0.0 {
+            continue;
+        }
+        index
+            .postings
+            .entry(dimension.clone())
+            .or_default()
+            .push(SparsePosting { doc_index, value });
+    }
+}
+
 fn remove_document_from_cached_indexes(
     namespace: &Namespace,
     doc_index: usize,
@@ -3646,6 +3768,18 @@ fn remove_document_from_cached_indexes(
     }
     for order in indexes.order.values_mut() {
         order.retain(|entry| entry.doc_index != doc_index);
+    }
+    for sparse_index in indexes.sparse_vectors.values_mut() {
+        let mut empty_dimensions = Vec::new();
+        for (dimension, postings) in &mut sparse_index.postings {
+            postings.retain(|posting| posting.doc_index != doc_index);
+            if postings.is_empty() {
+                empty_dimensions.push(dimension.clone());
+            }
+        }
+        for dimension in empty_dimensions {
+            sparse_index.postings.remove(&dimension);
+        }
     }
     let mut invalid_group_indexes = Vec::new();
     for (attribute, group_index) in &mut indexes.group_counts {
@@ -3683,6 +3817,13 @@ fn insert_document_into_cached_indexes(
             order,
             key,
             order_entry_for_document(doc_index, document, key),
+        );
+    }
+    for (attribute, sparse_index) in &mut indexes.sparse_vectors {
+        insert_sparse_document_postings(
+            sparse_index,
+            doc_index,
+            document_attr(document, attribute),
         );
     }
     let mut invalid_group_indexes = Vec::new();
