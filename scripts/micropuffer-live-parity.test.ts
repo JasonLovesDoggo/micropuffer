@@ -110,6 +110,14 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
   };
   expectJsonParity(await liveQuery(namespaceName, vectorQuery), miniQuery(namespaceName, vectorQuery));
 
+  const knnQuery: JsonObject = {
+    rank_by: ["vector", "kNN", [1.0, 0.0]],
+    limit: 2,
+    filters: ["public", "Eq", 1],
+    include_attributes: ["category", "score"]
+  };
+  expectJsonParity(await liveQuery(namespaceName, knnQuery), miniQuery(namespaceName, knnQuery));
+
   const bm25Query: JsonObject = {
     rank_by: ["text", "BM25", "quick walrus"],
     limit: 10,
