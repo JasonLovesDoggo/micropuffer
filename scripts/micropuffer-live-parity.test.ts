@@ -626,6 +626,12 @@ async function assertErrorParity(): Promise<void> {
   );
   const miniMissingNamespace = miniQueryError(missingNamespace, missingQuery);
   expectErrorParity(miniMissingNamespace, liveMissingNamespace);
+
+  const liveMissingDelete = await liveError(
+    "DELETE",
+    `/v2/namespaces/${encodeURIComponent(missingNamespace)}`
+  );
+  expectErrorParity(miniDeleteNamespaceError(missingNamespace), liveMissingDelete);
 }
 
 async function assertBranchParityIfAllowed(lookup: JsonObject): Promise<void> {
@@ -703,16 +709,28 @@ function miniQueryError(namespace: string, request: JsonObject): ErrorResult {
     micropuffer.queryResponse(namespace, JSON.stringify(request)),
     "micropuffer query response envelope"
   );
+  return errorResultFromEnvelope(response, "query");
+}
+
+function miniDeleteNamespaceError(namespace: string): ErrorResult {
+  const response = parseJsonObject(
+    micropuffer.deleteNamespaceResponse(namespace),
+    "micropuffer delete namespace response envelope"
+  );
+  return errorResultFromEnvelope(response, "delete namespace");
+}
+
+function errorResultFromEnvelope(response: JsonObject, label: string): ErrorResult {
   const status = response.status;
   const body = response.body;
   if (typeof status !== "number") {
-    throw new Error("micropuffer query response status was not a number.");
+    throw new Error(`micropuffer ${label} response status was not a number.`);
   }
   if (!isJsonObject(body)) {
-    throw new Error("micropuffer query response body was not an object.");
+    throw new Error(`micropuffer ${label} response body was not an object.`);
   }
   if (status < 400) {
-    throw new Error("Expected micropuffer query to fail.");
+    throw new Error(`Expected micropuffer ${label} to fail.`);
   }
   return { status, body };
 }

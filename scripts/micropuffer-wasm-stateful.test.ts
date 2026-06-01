@@ -111,6 +111,47 @@ test("repeated stateful queries keep full store JSON out of the call loop", () =
   );
 });
 
+test("response methods expose HTTP-style status envelopes", () => {
+  const engine = new Micropuffer();
+
+  const missingMetadata = parseJsonObject(
+    engine.metadataResponse("missing"),
+    "missing metadata response envelope"
+  );
+  expect(missingMetadata).toStrictEqual({
+    status: 404,
+    body: {
+      status: "error",
+      error: "🤷 namespace 'missing' was not found"
+    }
+  });
+
+  const write = parseJsonObject(
+    engine.writeResponse("local", json({ upsert_rows: [{ id: 1, vector: [1, 0] }] })),
+    "write response envelope"
+  );
+  expect(write.status).toBe(200);
+  expect(write.body).toMatchObject({ status: "OK", rows_affected: 1, rows_upserted: 1 });
+
+  const deleteOk = parseJsonObject(
+    engine.deleteNamespaceResponse("local"),
+    "delete response envelope"
+  );
+  expect(deleteOk).toStrictEqual({ status: 200, body: { status: "OK" } });
+
+  const deleteMissing = parseJsonObject(
+    engine.deleteNamespaceResponse("local"),
+    "missing delete response envelope"
+  );
+  expect(deleteMissing).toStrictEqual({
+    status: 404,
+    body: {
+      status: "error",
+      error: "🤷 namespace 'local' was not found"
+    }
+  });
+});
+
 function seedEngine(rowCount: number): Micropuffer {
   const engine = new Micropuffer();
   engine.write(
