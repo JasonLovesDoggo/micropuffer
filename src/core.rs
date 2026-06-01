@@ -225,7 +225,7 @@ pub struct Document {
 #[derive(Debug, Clone, Default)]
 struct NamespaceQueryIndexes {
     equality: HashMap<String, EqualityAttributeIndex>,
-    order: HashMap<OrderIndexKey, Vec<usize>>,
+    order: HashMap<OrderIndexKey, Vec<OrderIndexEntry>>,
 }
 
 impl NamespaceQueryIndexes {
@@ -233,11 +233,15 @@ impl NamespaceQueryIndexes {
         self.equality.clear();
         self.order.clear();
     }
+
+    fn is_empty(&self) -> bool {
+        self.equality.is_empty() && self.order.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
 struct EqualityAttributeIndex {
-    postings: HashMap<ScalarEqKey, Vec<usize>>,
+    postings: HashMap<ScalarEqKey, BTreeSet<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -250,6 +254,13 @@ enum ScalarEqKey {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct OrderIndexKey(Vec<(String, SortDirection)>);
+
+#[derive(Debug, Clone)]
+struct OrderIndexEntry {
+    id_key: String,
+    id: Value,
+    values: Vec<Value>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum SortDirection {
@@ -838,7 +849,6 @@ pub fn write_store(
         || !summary.patched_ids.is_empty()
         || !summary.deleted_ids.is_empty()
     {
-        namespace.query_indexes.borrow_mut().clear();
         let now = logical_now();
         namespace.last_write_at = Some(now.clone());
         namespace.updated_at = now;
@@ -2096,10 +2106,14 @@ fn upsert_document(
         {
             return Ok(false);
         }
+        let previous = namespace.documents[index].clone();
+        remove_document_from_cached_indexes(namespace, &previous);
         namespace.documents[index] = Document {
             id: row.id,
             attributes: row.attributes,
         };
+        let updated = namespace.documents[index].clone();
+        insert_document_into_cached_indexes(namespace, &updated);
     } else {
         let index = namespace.documents.len();
         let id = row.id;
@@ -2108,6 +2122,8 @@ fn upsert_document(
             id,
             attributes: row.attributes,
         });
+        let inserted = namespace.documents[index].clone();
+        insert_document_into_cached_indexes(namespace, &inserted);
     }
     Ok(true)
 }
@@ -2128,9 +2144,13 @@ fn patch_document(
     {
         return Ok(false);
     }
+    let previous = namespace.documents[index].clone();
+    remove_document_from_cached_indexes(namespace, &previous);
     for (key, value) in row.attributes {
         namespace.documents[index].attributes.insert(key, value);
     }
+    let updated = namespace.documents[index].clone();
+    insert_document_into_cached_indexes(namespace, &updated);
     Ok(true)
 }
 
@@ -2157,6 +2177,11 @@ fn delete_documents(
     }
     if !indexes.is_empty() {
         let selected = indexes.into_iter().collect::<BTreeSet<_>>();
+        for index in &selected {
+            if let Some(document) = namespace.documents.get(*index) {
+                remove_document_from_cached_indexes(namespace, document);
+            }
+        }
         let mut kept = Vec::with_capacity(namespace.documents.len() - selected.len());
         for (index, document) in namespace.documents.drain(..).enumerate() {
             if !selected.contains(&index) {
@@ -2197,6 +2222,11 @@ fn delete_by_filter(
         .take(DELETE_BY_FILTER_LIMIT)
         .collect::<BTreeSet<_>>();
     let rows_remaining = matched_count > DELETE_BY_FILTER_LIMIT;
+    for index in &selected {
+        if let Some(document) = namespace.documents.get(*index) {
+            remove_document_from_cached_indexes(namespace, document);
+        }
+    }
     let mut deleted = Vec::new();
     let mut kept = Vec::new();
     for (index, document) in namespace.documents.drain(..).enumerate() {
@@ -2259,6 +2289,13 @@ fn patch_by_filter(
         .take(PATCH_BY_FILTER_LIMIT)
         .collect::<BTreeSet<_>>();
     let mut patched = Vec::new();
+    let previous = selected
+        .iter()
+        .filter_map(|index| namespace.documents.get(*index).cloned())
+        .collect::<Vec<_>>();
+    for document in &previous {
+        remove_document_from_cached_indexes(namespace, document);
+    }
     for (index, document) in namespace.documents.iter_mut().enumerate() {
         if selected.contains(&index) {
             for (key, value) in patch {
@@ -2266,6 +2303,13 @@ fn patch_by_filter(
             }
             patched.push(document.id.clone());
         }
+    }
+    let updated = selected
+        .iter()
+        .filter_map(|index| namespace.documents.get(*index).cloned())
+        .collect::<Vec<_>>();
+    for document in &updated {
+        insert_document_into_cached_indexes(namespace, document);
     }
     Ok(FilterWriteOutcome {
         ids: patched,
@@ -2821,7 +2865,6 @@ fn rank_documents<'a>(
         .map(|filter| indexed_filter_candidates(namespace, filter))
         .transpose()?
         .flatten();
-    let has_indexed_candidates = indexed_candidates.is_some();
     let candidate_indexes = indexed_candidates
         .as_deref()
         .map(CandidateIndexes::Indexed)
@@ -2831,11 +2874,10 @@ fn rank_documents<'a>(
             .documents
             .get(index)
             .ok_or_else(|| QueryError::new("query index referenced a missing document."))?;
-        if !has_indexed_candidates
-            && !filters
-                .map(|filter| eval_filter_with_schema(document, filter, Some(&namespace.schema)))
-                .transpose()?
-                .unwrap_or(true)
+        if !filters
+            .map(|filter| eval_filter_with_schema(document, filter, Some(&namespace.schema)))
+            .transpose()?
+            .unwrap_or(true)
         {
             continue;
         }
@@ -2929,6 +2971,13 @@ fn indexed_order_ranked<'a>(
             .documents
             .get(index)
             .ok_or_else(|| QueryError::new("order index referenced a missing document."))?;
+        if !filters
+            .map(|filter| eval_filter_with_schema(document, filter, Some(&namespace.schema)))
+            .transpose()?
+            .unwrap_or(true)
+        {
+            continue;
+        }
         ranked.push(RankedDocument {
             doc: document,
             score: 0.0,
@@ -3019,15 +3068,20 @@ fn equality_postings(namespace: &Namespace, attr: &str, key: &ScalarEqKey) -> Ve
         .equality
         .entry(attr.to_string())
         .or_insert_with(|| build_equality_index(namespace, attr));
-    index.postings.get(key).cloned().unwrap_or_default()
+    let keys = index.postings.get(key).cloned().unwrap_or_default();
+    drop(indexes);
+    document_keys_to_sorted_positions(namespace, keys.iter())
 }
 
 fn build_equality_index(namespace: &Namespace, attr: &str) -> EqualityAttributeIndex {
-    let mut postings: HashMap<ScalarEqKey, Vec<usize>> = HashMap::new();
-    for (index, document) in namespace.documents.iter().enumerate() {
+    let mut postings: HashMap<ScalarEqKey, BTreeSet<String>> = HashMap::new();
+    for document in &namespace.documents {
         let value = document_attr(document, attr).unwrap_or(&Value::Null);
         if let Some(key) = scalar_eq_key(value) {
-            postings.entry(key).or_default().push(index);
+            postings
+                .entry(key)
+                .or_default()
+                .insert(id_key(&document.id));
         }
     }
     EqualityAttributeIndex { postings }
@@ -3035,29 +3089,149 @@ fn build_equality_index(namespace: &Namespace, attr: &str) -> EqualityAttributeI
 
 fn order_index(namespace: &Namespace, key: &OrderIndexKey) -> Vec<usize> {
     let mut indexes = namespace.query_indexes.borrow_mut();
-    indexes
+    let entries = indexes
         .order
         .entry(key.clone())
         .or_insert_with(|| build_order_index(namespace, key))
-        .clone()
+        .clone();
+    drop(indexes);
+    document_keys_to_ordered_positions(namespace, entries.iter().map(|entry| &entry.id_key))
 }
 
-fn build_order_index(namespace: &Namespace, key: &OrderIndexKey) -> Vec<usize> {
-    let mut order = (0..namespace.documents.len()).collect::<Vec<_>>();
-    order.sort_by(|left, right| {
-        compare_order_attrs(
-            &namespace.documents[*left],
-            &namespace.documents[*right],
-            &key.0,
-        )
-        .then_with(|| {
-            stable_id_compare(
-                &namespace.documents[*left].id,
-                &namespace.documents[*right].id,
-            )
-        })
-    });
+fn build_order_index(namespace: &Namespace, key: &OrderIndexKey) -> Vec<OrderIndexEntry> {
+    let mut order = namespace
+        .documents
+        .iter()
+        .map(|document| order_entry_for_document(document, key))
+        .collect::<Vec<_>>();
+    order.sort_by(|left, right| compare_order_entries(left, right, key));
     order
+}
+
+fn document_keys_to_sorted_positions<'a>(
+    namespace: &Namespace,
+    keys: impl Iterator<Item = &'a String>,
+) -> Vec<usize> {
+    let positions_by_id = document_positions_by_id_key(namespace);
+    let mut positions = keys
+        .filter_map(|key| positions_by_id.get(key).copied())
+        .collect::<Vec<_>>();
+    positions.sort_unstable();
+    positions.dedup();
+    positions
+}
+
+fn document_keys_to_ordered_positions<'a>(
+    namespace: &Namespace,
+    keys: impl Iterator<Item = &'a String>,
+) -> Vec<usize> {
+    let positions_by_id = document_positions_by_id_key(namespace);
+    keys.filter_map(|key| positions_by_id.get(key).copied())
+        .collect()
+}
+
+fn document_positions_by_id_key(namespace: &Namespace) -> HashMap<String, usize> {
+    let mut positions = HashMap::with_capacity(namespace.documents.len());
+    for (index, document) in namespace.documents.iter().enumerate() {
+        positions.entry(id_key(&document.id)).or_insert(index);
+    }
+    positions
+}
+
+fn remove_document_from_cached_indexes(namespace: &Namespace, document: &Document) {
+    let mut indexes = namespace.query_indexes.borrow_mut();
+    if indexes.is_empty() {
+        return;
+    }
+    let document_id_key = id_key(&document.id);
+    for (attribute, index) in &mut indexes.equality {
+        let value = document_attr(document, attribute).unwrap_or(&Value::Null);
+        let Some(key) = scalar_eq_key(value) else {
+            continue;
+        };
+        let remove_key = if let Some(postings) = index.postings.get_mut(&key) {
+            postings.remove(&document_id_key);
+            postings.is_empty()
+        } else {
+            false
+        };
+        if remove_key {
+            index.postings.remove(&key);
+        }
+    }
+    for order in indexes.order.values_mut() {
+        order.retain(|entry| entry.id_key != document_id_key);
+    }
+}
+
+fn insert_document_into_cached_indexes(namespace: &Namespace, document: &Document) {
+    let mut indexes = namespace.query_indexes.borrow_mut();
+    if indexes.is_empty() {
+        return;
+    }
+    let document_id_key = id_key(&document.id);
+    for (attribute, index) in &mut indexes.equality {
+        let value = document_attr(document, attribute).unwrap_or(&Value::Null);
+        if let Some(key) = scalar_eq_key(value) {
+            index
+                .postings
+                .entry(key)
+                .or_default()
+                .insert(document_id_key.clone());
+        }
+    }
+    for (key, order) in &mut indexes.order {
+        order.retain(|entry| entry.id_key != document_id_key);
+        insert_order_entry(order, key, order_entry_for_document(document, key));
+    }
+}
+
+fn order_entry_for_document(document: &Document, key: &OrderIndexKey) -> OrderIndexEntry {
+    OrderIndexEntry {
+        id_key: id_key(&document.id),
+        id: document.id.clone(),
+        values: key
+            .0
+            .iter()
+            .map(|(attribute, _)| {
+                document_attr(document, attribute)
+                    .cloned()
+                    .unwrap_or(Value::Null)
+            })
+            .collect(),
+    }
+}
+
+fn insert_order_entry(
+    order: &mut Vec<OrderIndexEntry>,
+    key: &OrderIndexKey,
+    entry: OrderIndexEntry,
+) {
+    let position = order
+        .binary_search_by(|candidate| compare_order_entries(candidate, &entry, key))
+        .unwrap_or_else(|position| position);
+    order.insert(position, entry);
+}
+
+fn compare_order_entries(
+    left: &OrderIndexEntry,
+    right: &OrderIndexEntry,
+    key: &OrderIndexKey,
+) -> Ordering {
+    left.values
+        .iter()
+        .zip(&right.values)
+        .zip(&key.0)
+        .map(|((left, right), (_, direction))| {
+            let base = compare_values_for_order(Some(left), Some(right));
+            match direction {
+                SortDirection::Asc => base,
+                SortDirection::Desc => base.reverse(),
+            }
+        })
+        .find(|ordering| *ordering != Ordering::Equal)
+        .unwrap_or(Ordering::Equal)
+        .then_with(|| stable_id_compare(&left.id, &right.id))
 }
 
 fn order_index_key(kind: &RankKind) -> Option<OrderIndexKey> {
