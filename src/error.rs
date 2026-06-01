@@ -16,6 +16,10 @@ impl QueryError {
         Self::with_status(422, message)
     }
 
+    pub(crate) fn not_found(message: impl Into<String>) -> Self {
+        Self::with_status(404, message)
+    }
+
     fn with_status(status_code: u16, message: impl Into<String>) -> Self {
         Self {
             message: message.into(),

@@ -2420,6 +2420,27 @@ fn query_validation_errors_carry_http_status_codes() {
 }
 
 #[test]
+fn missing_namespace_errors_match_live_status_and_text() {
+    let mut clone = Micropuffer::new();
+    let missing = "missing-namespace";
+    let expected = "🤷 namespace 'missing-namespace' was not found";
+
+    let query_error = clone
+        .query(missing, &json!({"rank_by": ["id", "asc"], "limit": 1}))
+        .unwrap_err();
+    assert_eq!(query_error.status_code(), 404);
+    assert_eq!(query_error.to_string(), expected);
+
+    let metadata_error = clone.metadata(missing).unwrap_err();
+    assert_eq!(metadata_error.status_code(), 404);
+    assert_eq!(metadata_error.to_string(), expected);
+
+    let delete_error = clone.delete_namespace(missing).unwrap_err();
+    assert_eq!(delete_error.status_code(), 404);
+    assert_eq!(delete_error.to_string(), expected);
+}
+
+#[test]
 fn schema_update_and_warm_cache_match_workspace_shapes() {
     let mut clone = Micropuffer::new();
     clone

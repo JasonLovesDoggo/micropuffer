@@ -26,7 +26,7 @@ impl MiniStore {
         self.namespaces
             .iter()
             .find(|namespace| namespace.name == name)
-            .ok_or_else(|| QueryError::new(format!("Namespace '{name}' was not found.")))
+            .ok_or_else(|| namespace_not_found(name))
     }
 
     fn namespace_mut(&mut self, name: &str) -> Option<&mut Namespace> {
@@ -63,9 +63,15 @@ impl Micropuffer {
     }
 
     pub fn delete_namespace(&mut self, namespace_name: &str) -> Result<Value, QueryError> {
-        self.store
+        let Some(index) = self
+            .store
             .namespaces
-            .retain(|namespace| namespace.name != namespace_name);
+            .iter()
+            .position(|namespace| namespace.name == namespace_name)
+        else {
+            return Err(namespace_not_found(namespace_name));
+        };
+        self.store.namespaces.remove(index);
         Ok(json!({ "status": "OK" }))
     }
 
@@ -162,6 +168,10 @@ impl Micropuffer {
     ) -> Result<Value, QueryError> {
         explain_query(self.store.namespace(namespace_name)?, request)
     }
+}
+
+fn namespace_not_found(name: &str) -> QueryError {
+    QueryError::not_found(format!("🤷 namespace '{name}' was not found"))
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -884,7 +894,7 @@ pub fn update_namespace_schema(
     let schema = as_object(request, "schema update request")?;
     let namespace = store
         .namespace_mut(namespace_name)
-        .ok_or_else(|| QueryError::new(format!("Namespace '{namespace_name}' was not found.")))?;
+        .ok_or_else(|| namespace_not_found(namespace_name))?;
     merge_schema(namespace, schema)?;
     namespace.invalidate_fts_indexes();
     namespace.updated_at = logical_now();
@@ -899,7 +909,7 @@ pub fn patch_namespace_metadata(
     let request = as_object(request, "metadata patch request")?;
     let namespace = store
         .namespace_mut(namespace_name)
-        .ok_or_else(|| QueryError::new(format!("Namespace '{namespace_name}' was not found.")))?;
+        .ok_or_else(|| namespace_not_found(namespace_name))?;
     if let Some(pinning) = request.get("pinning") {
         namespace.pinning = parse_pinning(pinning)?;
     }
