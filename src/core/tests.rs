@@ -3426,25 +3426,19 @@ fn recall_and_explain_query_match_debug_endpoint_shapes() {
     assert_eq!(recall["avg_recall"], 1.0);
     assert_eq!(recall["avg_exhaustive_count"], 2.0);
     assert_eq!(recall["avg_ann_count"], 2.0);
-    assert_eq!(
-        recall["ground_truth"]
-            .as_array()
-            .expect("ground truth array")
-            .len(),
-        2
-    );
+    assert!(recall.get("ground_truth").is_none());
     let capped_recall = clone
         .recall(
             "debug",
             &json!({
-                "top_k": 1,
+                "top_k": 10,
                 "filters": ["public", "Eq", 1]
             }),
         )
         .unwrap();
     assert_eq!(capped_recall["avg_recall"], 1.0);
-    assert_eq!(capped_recall["avg_exhaustive_count"], 1.0);
-    assert_eq!(capped_recall["avg_ann_count"], 1.0);
+    assert_eq!(capped_recall["avg_exhaustive_count"], 10.0);
+    assert_eq!(capped_recall["avg_ann_count"], 10.0);
 
     let explained = clone
         .explain_query(

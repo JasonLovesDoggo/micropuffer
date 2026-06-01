@@ -56,7 +56,7 @@ Sources checked:
   - grouped count aggregation
   - grouped aggregation default `top_k`
   - multi-query
-- `POST /v1/namespaces/:namespace/_debug/recall`, exact basic response parity for deterministic small namespaces
+- `POST /v1/namespaces/:namespace/_debug/recall`, exact basic response parity for deterministic small namespaces, including live's current omission of `ground_truth`
 - `POST /v2/namespaces/:namespace/explain_query`, local shape only; live returned `400` for the temp namespace/index state
 - deprecated `GET /v1/namespaces/:namespace` columnar export
 - `GET /v1/namespaces`, including prefix, query-string `page_size` parsing, live-style `cursor` pagination, exhausted-page `next_cursor: null`, page-size error parity, and malformed-cursor error parity
@@ -97,7 +97,6 @@ Sources checked:
 - WASM `*Response` helpers for HTTP-style status/body mock envelopes
 - `Saturate`, `Decay`, and `Dist` rank operators
 - current documented filter-write partial limits: 50k rows for `patch_by_filter`, 5M rows for `delete_by_filter`
-- recall ground-truth projection
 - explain-query plan text
 
 ## Known gaps
@@ -119,3 +118,4 @@ Sources checked:
 - Live aggregate queries reject the `limit` field before execution; micropuffer rejects it with the same stable field name but does not reproduce Serde's byte-offset wording.
 - The query docs imply multiple `aggregate_by` labels can be supplied, but live turbopuffer currently rejects multiple aggregate functions with `💔 aggregate_by currently requires exactly one function`.
 - Live schema updates require `type` for object definitions, but ignore unknown option keys when `type` is present.
+- OpenAPI documents `include_ground_truth` on recall responses, but live turbopuffer currently omits `ground_truth` even when `include_ground_truth: true`.
