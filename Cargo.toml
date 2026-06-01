@@ -2,6 +2,13 @@
 name = "micropuffer"
 version = "0.2.0"
 edition = "2024"
+description = "In-memory turbopuffer-compatible query engine for local tests and mocks."
+license = "MIT"
+repository = "https://github.com/JasonLovesDoggo/micropuffer"
+readme = "README.md"
+keywords = ["mock", "search", "turbopuffer", "vector", "wasm"]
+categories = ["database-implementations", "development-tools::testing"]
+include = ["Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "fixtures/**", "src/**", "tests/**"]
 
 [lib]
 name = "micropuffer"
