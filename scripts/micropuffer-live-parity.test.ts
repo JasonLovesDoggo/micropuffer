@@ -144,6 +144,26 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
     miniQuery(namespaceName, includeAttributesFalseQuery)
   );
 
+  const includeAttributesTrueQuery: JsonObject = {
+    rank_by: ["id", "asc"],
+    limit: 1,
+    include_attributes: true
+  };
+  expectJsonParity(
+    await liveQuery(namespaceName, includeAttributesTrueQuery),
+    miniQuery(namespaceName, includeAttributesTrueQuery)
+  );
+
+  const includeAttributesEmptyQuery: JsonObject = {
+    rank_by: ["id", "asc"],
+    limit: 1,
+    include_attributes: []
+  };
+  expectJsonParity(
+    await liveQuery(namespaceName, includeAttributesEmptyQuery),
+    miniQuery(namespaceName, includeAttributesEmptyQuery)
+  );
+
   const base64VectorQuery: JsonObject = {
     rank_by: ["id", "asc"],
     limit: 1,

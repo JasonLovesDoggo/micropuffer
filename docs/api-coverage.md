@@ -36,7 +36,9 @@ Sources checked:
   - rank expressions using `Sum`, `Max`, `Product`, `Attribute`, filters-as-scores
   - filters: equality, membership, array containment, numeric comparisons, array comparisons, glob, case-insensitive glob, regex, fuzzy, token filters, boolean combinators
   - projections with `include_attributes`
+  - projections with `include_attributes: true`
   - projections with `include_attributes: false`
+  - projections with `include_attributes: []`
   - projections with `exclude_attributes`
   - `vector_encoding: "base64"` output
   - `limit.per` for order-by-attribute queries
