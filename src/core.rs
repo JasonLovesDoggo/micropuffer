@@ -4816,6 +4816,7 @@ fn count_aggregate_labels(
         if op != "Count" {
             return Ok(None);
         }
+        validate_count_aggregate(array)?;
         labels.push(label.clone());
     }
     Ok(Some(labels))
@@ -5024,7 +5025,10 @@ fn evaluate_aggregate(aggregate: &Value, documents: &[&Document]) -> Result<Valu
         .and_then(Value::as_str)
         .ok_or_else(|| QueryError::new("aggregate function requires an operator."))?;
     match op {
-        "Count" => Ok(Value::Number(Number::from(documents.len()))),
+        "Count" => {
+            validate_count_aggregate(array)?;
+            Ok(Value::Number(Number::from(documents.len())))
+        }
         "Sum" => {
             let attribute = array
                 .get(1)
@@ -5040,6 +5044,19 @@ fn evaluate_aggregate(aggregate: &Value, documents: &[&Document]) -> Result<Valu
         _ => Err(QueryError::new(format!(
             "Unsupported aggregate function '{op}'."
         ))),
+    }
+}
+
+fn validate_count_aggregate(array: &[Value]) -> Result<(), QueryError> {
+    match array {
+        [_] => Ok(()),
+        [_, Value::String(attribute)] if attribute == "id" => Ok(()),
+        [_, Value::String(_)] => Err(QueryError::new(
+            "💔 aggregate_by with attributes other than \"id\" not yet supported",
+        )),
+        _ => Err(QueryError::new(
+            "💔 aggregate_by currently requires exactly one function",
+        )),
     }
 }
 
