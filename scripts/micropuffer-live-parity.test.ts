@@ -23,13 +23,21 @@ const branchNamespaceName = `${namespaceName}-branch`;
 const euclideanNamespaceName = `${namespaceName}-euclidean`;
 const uuidNamespaceName = `${namespaceName}-uuid`;
 const uuidInvalidNamespaceName = `${namespaceName}-uuid-invalid`;
+const stringIdNamespaceName = `${namespaceName}-id-string`;
+const uintIdNamespaceName = `${namespaceName}-id-uint`;
+const inferredUintIdNamespaceName = `${namespaceName}-id-inferred-uint`;
+const invalidIdSchemaNamespaceName = `${namespaceName}-id-invalid-schema`;
 const namespacesToDelete = [
   namespaceName,
   copyNamespaceName,
   branchNamespaceName,
   euclideanNamespaceName,
   uuidNamespaceName,
-  uuidInvalidNamespaceName
+  uuidInvalidNamespaceName,
+  stringIdNamespaceName,
+  uintIdNamespaceName,
+  inferredUintIdNamespaceName,
+  invalidIdSchemaNamespaceName
 ];
 
 loadEnv();
@@ -52,6 +60,10 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
   await deleteLiveNamespace(branchNamespaceName);
   await deleteLiveNamespace(uuidNamespaceName);
   await deleteLiveNamespace(uuidInvalidNamespaceName);
+  await deleteLiveNamespace(stringIdNamespaceName);
+  await deleteLiveNamespace(uintIdNamespaceName);
+  await deleteLiveNamespace(inferredUintIdNamespaceName);
+  await deleteLiveNamespace(invalidIdSchemaNamespaceName);
 
   const seedWrite: JsonObject = {
     distance_metric: "cosine_distance",
@@ -314,6 +326,7 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
   await assertInvalidNamespaceParity();
   await assertEuclideanDistanceMetricParity();
   await assertUuidIdSchemaParity();
+  await assertTypedIdSchemaParity();
   await assertBranchParityIfAllowed(afterDeleteLookup);
 });
 
@@ -1025,6 +1038,54 @@ async function assertUuidIdSchemaParity(): Promise<void> {
   };
   expectJsonParity(await liveQuery(uuidNamespaceName, lookup), miniQuery(uuidNamespaceName, lookup));
 
+  const uppercaseIdFilter: JsonObject = {
+    rank_by: ["id", "asc"],
+    limit: 10,
+    filters: ["id", "Eq", "769C134D-07B8-4225-954A-B6CC5FFC320C"]
+  };
+  expectJsonParity(
+    await liveQuery(uuidNamespaceName, uppercaseIdFilter),
+    miniQuery(uuidNamespaceName, uppercaseIdFilter)
+  );
+
+  const simpleIdFilter: JsonObject = {
+    rank_by: ["id", "asc"],
+    limit: 10,
+    filters: ["id", "Eq", "769c134d07b84225954ab6cc5ffc320c"]
+  };
+  expectJsonParity(await liveQuery(uuidNamespaceName, simpleIdFilter), miniQuery(uuidNamespaceName, simpleIdFilter));
+
+  const uuidRangeFilter: JsonObject = {
+    rank_by: ["id", "asc"],
+    limit: 10,
+    filters: ["id", "Gte", "769c134d07b84225954ab6cc5ffc320c"]
+  };
+  expectJsonParity(await liveQuery(uuidNamespaceName, uuidRangeFilter), miniQuery(uuidNamespaceName, uuidRangeFilter));
+
+  const invalidUuidFilter: JsonObject = {
+    rank_by: ["id", "asc"],
+    limit: 10,
+    filters: ["id", "Eq", "not-a-uuid"]
+  };
+  expectErrorParity(
+    miniQueryError(uuidNamespaceName, invalidUuidFilter),
+    await liveError("POST", `/v2/namespaces/${encodeURIComponent(uuidNamespaceName)}/query`, invalidUuidFilter)
+  );
+
+  const invalidUuidInFilter: JsonObject = {
+    rank_by: ["id", "asc"],
+    limit: 10,
+    filters: [
+      "id",
+      "In",
+      ["not-a-uuid", "769C134D-07B8-4225-954A-B6CC5FFC320C"]
+    ]
+  };
+  expectErrorParity(
+    miniQueryError(uuidNamespaceName, invalidUuidInFilter),
+    await liveError("POST", `/v2/namespaces/${encodeURIComponent(uuidNamespaceName)}/query`, invalidUuidInFilter)
+  );
+
   const liveSchema = await liveJson("GET", `/v1/namespaces/${encodeURIComponent(uuidNamespaceName)}/schema`);
   const miniSchema = parseJsonObject(
     micropuffer.schema(uuidNamespaceName),
@@ -1083,6 +1144,96 @@ async function assertUuidIdSchemaParity(): Promise<void> {
   expectErrorParity(
     miniWriteError(uuidNamespaceName, duplicateUuidWrite),
     await liveError("POST", `/v2/namespaces/${encodeURIComponent(uuidNamespaceName)}`, duplicateUuidWrite)
+  );
+}
+
+async function assertTypedIdSchemaParity(): Promise<void> {
+  await deleteLiveNamespace(stringIdNamespaceName);
+  await deleteLiveNamespace(uintIdNamespaceName);
+  await deleteLiveNamespace(inferredUintIdNamespaceName);
+  await deleteLiveNamespace(invalidIdSchemaNamespaceName);
+
+  const invalidIdSchema: JsonObject = {
+    schema: { id: "int", title: "string" },
+    upsert_rows: [{ id: 1, title: "bad" }]
+  };
+  expectErrorParity(
+    miniWriteError(invalidIdSchemaNamespaceName, invalidIdSchema),
+    await liveError("POST", `/v2/namespaces/${encodeURIComponent(invalidIdSchemaNamespaceName)}`, invalidIdSchema)
+  );
+
+  const stringIdMismatch: JsonObject = {
+    schema: { id: "string", title: "string" },
+    upsert_rows: [{ id: 1, title: "bad" }]
+  };
+  expectErrorParity(
+    miniWriteError(stringIdNamespaceName, stringIdMismatch),
+    await liveError("POST", `/v2/namespaces/${encodeURIComponent(stringIdNamespaceName)}`, stringIdMismatch)
+  );
+
+  const stringIdWrite: JsonObject = {
+    schema: { id: "string", title: "string" },
+    upsert_rows: [{ id: "abc", title: "good" }]
+  };
+  expectJsonParity(await liveWrite(stringIdNamespaceName, stringIdWrite), miniWrite(stringIdNamespaceName, stringIdWrite));
+
+  const stringIdFilterMismatch: JsonObject = {
+    rank_by: ["id", "asc"],
+    limit: 10,
+    filters: ["id", "Eq", 1]
+  };
+  expectErrorParity(
+    miniQueryError(stringIdNamespaceName, stringIdFilterMismatch),
+    await liveError(
+      "POST",
+      `/v2/namespaces/${encodeURIComponent(stringIdNamespaceName)}/query`,
+      stringIdFilterMismatch
+    )
+  );
+
+  const uintIdMismatch: JsonObject = {
+    schema: { id: "uint", title: "string" },
+    upsert_rows: [{ id: "abc", title: "bad" }]
+  };
+  expectErrorParity(
+    miniWriteError(uintIdNamespaceName, uintIdMismatch),
+    await liveError("POST", `/v2/namespaces/${encodeURIComponent(uintIdNamespaceName)}`, uintIdMismatch)
+  );
+
+  const uintIdWrite: JsonObject = {
+    schema: { id: "uint", title: "string" },
+    upsert_rows: [{ id: 1, title: "good" }]
+  };
+  expectJsonParity(await liveWrite(uintIdNamespaceName, uintIdWrite), miniWrite(uintIdNamespaceName, uintIdWrite));
+
+  const uintIdFilterMismatch: JsonObject = {
+    rank_by: ["id", "asc"],
+    limit: 10,
+    filters: ["id", "Eq", "abc"]
+  };
+  expectErrorParity(
+    miniQueryError(uintIdNamespaceName, uintIdFilterMismatch),
+    await liveError("POST", `/v2/namespaces/${encodeURIComponent(uintIdNamespaceName)}/query`, uintIdFilterMismatch)
+  );
+
+  const inferredUintWrite: JsonObject = {
+    upsert_rows: [{ id: 1, title: "good" }]
+  };
+  expectJsonParity(
+    await liveWrite(inferredUintIdNamespaceName, inferredUintWrite),
+    miniWrite(inferredUintIdNamespaceName, inferredUintWrite)
+  );
+
+  const inferredUintMismatch: JsonObject = {
+    upsert_rows: [{ id: "1", title: "bad" }]
+  };
+  expectErrorParity(
+    miniWriteError(inferredUintIdNamespaceName, inferredUintMismatch),
+    await liveError(
+      "POST",
+      `/v2/namespaces/${encodeURIComponent(inferredUintIdNamespaceName)}`,
+      inferredUintMismatch
+    )
   );
 }
 

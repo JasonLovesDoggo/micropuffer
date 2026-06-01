@@ -2093,6 +2093,163 @@ fn uuid_id_schema_normalizes_and_rejects_written_ids() {
 }
 
 #[test]
+fn typed_id_schema_rejects_mixed_ids_and_normalizes_uuid_filters() {
+    let mut clone = Micropuffer::new();
+    let invalid_schema = clone
+        .write(
+            "id-int",
+            &json!({
+                "schema": {"id": "int"},
+                "upsert_rows": [{"id": 1, "title": "bad"}]
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(invalid_schema.to_string(), "💔 int is not a valid ID type");
+    assert_eq!(clone.metadata("id-int").unwrap_err().status_code(), 404);
+
+    let string_mismatch = clone
+        .write(
+            "id-string",
+            &json!({
+                "schema": {"id": "string", "title": "string"},
+                "upsert_rows": [{"id": 1, "title": "bad"}]
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(
+        string_mismatch.to_string(),
+        "💔 namespace ID type is string, but you sent uint; you are not allowed to mix ID types in the same namespace"
+    );
+
+    clone
+        .write(
+            "id-string",
+            &json!({
+                "schema": {"id": "string", "title": "string"},
+                "upsert_rows": [{"id": "abc", "title": "good"}]
+            }),
+        )
+        .unwrap();
+    let string_filter_mismatch = clone
+        .query(
+            "id-string",
+            &json!({
+                "rank_by": ["id", "asc"],
+                "limit": 10,
+                "filters": ["id", "Eq", 1]
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(
+        string_filter_mismatch.to_string(),
+        "filter error in key `id`: type mismatch, Eq expects string, but got '1'"
+    );
+
+    let uint_mismatch = clone
+        .write(
+            "id-uint",
+            &json!({
+                "schema": {"id": "uint", "title": "string"},
+                "upsert_rows": [{"id": "abc", "title": "bad"}]
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(
+        uint_mismatch.to_string(),
+        "💔 namespace ID type is uint, but you sent string; you are not allowed to mix ID types in the same namespace"
+    );
+
+    clone
+        .write(
+            "inferred-uint",
+            &json!({"upsert_rows": [{"id": 1, "title": "one"}]}),
+        )
+        .unwrap();
+    let inferred_mismatch = clone
+        .write(
+            "inferred-uint",
+            &json!({"upsert_rows": [{"id": "1", "title": "bad"}]}),
+        )
+        .unwrap_err();
+    assert_eq!(
+        inferred_mismatch.to_string(),
+        "💔 namespace ID type is uint, but you sent string; you are not allowed to mix ID types in the same namespace"
+    );
+
+    clone
+        .write(
+            "id-uuid-filter",
+            &json!({
+                "schema": {"id": "uuid", "title": "string"},
+                "upsert_rows": [
+                    {"id": "769c134d-07b8-4225-954a-b6cc5ffc320c", "title": "good"}
+                ]
+            }),
+        )
+        .unwrap();
+    let uppercase_filter = clone
+        .query(
+            "id-uuid-filter",
+            &json!({
+                "rank_by": ["id", "asc"],
+                "limit": 10,
+                "filters": ["id", "Eq", "769C134D-07B8-4225-954A-B6CC5FFC320C"]
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        rows(&uppercase_filter)[0]["id"],
+        "769c134d-07b8-4225-954a-b6cc5ffc320c"
+    );
+
+    let simple_gte_filter = clone
+        .query(
+            "id-uuid-filter",
+            &json!({
+                "rank_by": ["id", "asc"],
+                "limit": 10,
+                "filters": ["id", "Gte", "769c134d07b84225954ab6cc5ffc320c"]
+            }),
+        )
+        .unwrap();
+    assert_eq!(rows(&simple_gte_filter).len(), 1);
+
+    let invalid_uuid_filter = clone
+        .query(
+            "id-uuid-filter",
+            &json!({
+                "rank_by": ["id", "asc"],
+                "limit": 10,
+                "filters": ["id", "Eq", "not-a-uuid"]
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(
+        invalid_uuid_filter.to_string(),
+        "filter error in key `id`: type mismatch, Eq expects uuid, but got 'not-a-uuid'"
+    );
+
+    let invalid_uuid_in_filter = clone
+        .query(
+            "id-uuid-filter",
+            &json!({
+                "rank_by": ["id", "asc"],
+                "limit": 10,
+                "filters": [
+                    "id",
+                    "In",
+                    ["not-a-uuid", "769C134D-07B8-4225-954A-B6CC5FFC320C"]
+                ]
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(
+        invalid_uuid_in_filter.to_string(),
+        "filter error in key `id`: type mismatch, In expects uuid or []uuid, but got '[not-a-uuid, 769C134D-07B8-4225-954A-B6CC5FFC320C]'"
+    );
+}
+
+#[test]
 fn write_responses_include_requested_zero_counts_and_query_billing() {
     let mut clone = Micropuffer::new();
     clone
