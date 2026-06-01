@@ -14,16 +14,21 @@ pnpm add micropuffer
 import { Micropuffer } from "micropuffer";
 
 const engine = new Micropuffer();
-engine.write(
-  "local",
-  JSON.stringify({ distance_metric: "cosine_distance", upsert_rows: [{ id: 1, vector: [1, 0] }] })
-);
-const response = engine.query("local", JSON.stringify({ rank_by: ["id", "asc"], limit: 10 }));
-const httpResponse = engine.queryResponse("local", JSON.stringify({ rank_by: ["id", "asc"], limit: 10 }));
+const ns = engine.namespace("quickstart-example");
+
+await ns.write({
+  distance_metric: "cosine_distance",
+  upsert_rows: [{ id: 1, vector: [1, 0] }],
+});
+
+const response = await ns.query({ rank_by: ["id", "asc"], limit: 10 });
+const httpResponse = await ns.queryResponse({ rank_by: ["id", "asc"], limit: 10 });
 const storeJson = engine.exportStore();
 ```
 
-Raw methods like `query` and `write` throw string errors through the WASM API. The matching `*Response` methods return JSON strings with `{ status, body }`, which is better for HTTP mocks that need turbopuffer-style error status and body parity.
+Like turbopuffer, the first write that creates a dense vector column must include `distance_metric`.
+
+Namespace methods accept JavaScript request objects and return parsed JavaScript response objects. The lower-level `engine.query(namespaceName, requestJson)` and `engine.write(namespaceName, requestJson)` methods are still available when an HTTP bridge needs raw JSON strings from the WASM boundary.
 
 The npm package ships generated `wasm-bindgen` output from `pkg/`. Generated artifacts are built during `prepack` and in the publish workflow, but are not committed to git.
 
