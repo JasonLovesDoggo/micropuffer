@@ -10,6 +10,7 @@ use serde_json::{Map, Number, Value, json};
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Mutex, MutexGuard};
 use unicode_segmentation::UnicodeSegmentation;
 
 const PATCH_BY_FILTER_LIMIT: usize = 50_000;
@@ -185,6 +186,85 @@ pub struct Namespace {
     pub documents: Vec<Document>,
     #[serde(skip, default)]
     query_indexes: RefCell<NamespaceQueryIndexes>,
+    #[serde(skip)]
+    logical_bytes_cache: NamespaceLogicalBytesCache,
+}
+
+impl Namespace {
+    fn invalidate_logical_bytes(&self) {
+        self.logical_bytes_cache.clear();
+    }
+
+    fn set_cached_logical_bytes(&self, bytes: usize) {
+        self.logical_bytes_cache.set(bytes);
+    }
+
+    #[cfg(test)]
+    fn logical_bytes_recompute_count(&self) -> usize {
+        self.logical_bytes_cache.recompute_count()
+    }
+
+    #[cfg(test)]
+    fn has_cached_logical_bytes(&self) -> bool {
+        self.logical_bytes_cache.get().is_some()
+    }
+}
+
+#[derive(Debug, Default)]
+struct NamespaceLogicalBytesCache {
+    bytes: Mutex<Option<usize>>,
+    #[cfg(test)]
+    recompute_count: Mutex<usize>,
+}
+
+impl Clone for NamespaceLogicalBytesCache {
+    fn clone(&self) -> Self {
+        Self {
+            bytes: Mutex::new(self.get()),
+            #[cfg(test)]
+            recompute_count: Mutex::new(self.recompute_count()),
+        }
+    }
+}
+
+impl NamespaceLogicalBytesCache {
+    fn get(&self) -> Option<usize> {
+        *self.bytes_guard()
+    }
+
+    fn set(&self, bytes: usize) {
+        *self.bytes_guard() = Some(bytes);
+    }
+
+    fn clear(&self) {
+        *self.bytes_guard() = None;
+    }
+
+    fn bytes_guard(&self) -> MutexGuard<'_, Option<usize>> {
+        match self.bytes.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    #[cfg(test)]
+    fn record_recompute(&self) {
+        let mut recompute_count = self.recompute_count_guard();
+        *recompute_count = (*recompute_count).saturating_add(1);
+    }
+
+    #[cfg(test)]
+    fn recompute_count(&self) -> usize {
+        *self.recompute_count_guard()
+    }
+
+    #[cfg(test)]
+    fn recompute_count_guard(&self) -> MutexGuard<'_, usize> {
+        match self.recompute_count.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
 }
 
 fn default_created_at() -> String {
@@ -849,6 +929,7 @@ pub fn write_store(
         || !summary.patched_ids.is_empty()
         || !summary.deleted_ids.is_empty()
     {
+        namespace.invalidate_logical_bytes();
         let now = logical_now();
         namespace.last_write_at = Some(now.clone());
         namespace.updated_at = now;
@@ -947,11 +1028,12 @@ fn query_single(
 
 fn with_metrics(mut response: Value, namespace: &Namespace) -> Value {
     if let Value::Object(object) = &mut response {
+        let logical_bytes = rough_namespace_bytes(namespace);
         object.insert(
             "billing".to_string(),
             json!({
-                "billable_logical_bytes_queried": rough_namespace_bytes(namespace),
-                "billable_logical_bytes_returned": rough_namespace_bytes(namespace).min(4096)
+                "billable_logical_bytes_queried": logical_bytes,
+                "billable_logical_bytes_returned": logical_bytes.min(4096)
             }),
         );
         object.insert(
@@ -971,6 +1053,17 @@ fn with_metrics(mut response: Value, namespace: &Namespace) -> Value {
 }
 
 fn rough_namespace_bytes(namespace: &Namespace) -> usize {
+    if let Some(bytes) = namespace.logical_bytes_cache.get() {
+        return bytes;
+    }
+    let bytes = compute_namespace_bytes(namespace);
+    namespace.logical_bytes_cache.set(bytes);
+    #[cfg(test)]
+    namespace.logical_bytes_cache.record_recompute();
+    bytes
+}
+
+fn compute_namespace_bytes(namespace: &Namespace) -> usize {
     namespace
         .documents
         .iter()
@@ -1848,6 +1941,7 @@ fn ensure_namespace(store: &mut MiniStore, namespace_name: &str) {
             branching_parent: None,
             documents: Vec::new(),
             query_indexes: RefCell::new(NamespaceQueryIndexes::default()),
+            logical_bytes_cache: NamespaceLogicalBytesCache::default(),
         });
     }
 }
@@ -1891,6 +1985,7 @@ fn copy_namespace(
         destination.last_write_at = Some(logical_now());
         destination.documents = source.documents;
         destination.query_indexes.borrow_mut().clear();
+        destination.set_cached_logical_bytes(bytes_written);
     } else {
         store.namespaces.push(Namespace {
             name: destination_name.to_string(),
@@ -1904,7 +1999,12 @@ fn copy_namespace(
             branching_parent: branch.then(|| source.name.clone()),
             documents: source.documents,
             query_indexes: RefCell::new(NamespaceQueryIndexes::default()),
+            logical_bytes_cache: NamespaceLogicalBytesCache::default(),
         });
+        store
+            .namespace_mut(destination_name)
+            .ok_or_else(|| QueryError::new("namespace disappeared during copy."))?
+            .set_cached_logical_bytes(bytes_written);
     }
     Ok(json!({
         "rows_affected": rows_affected,
