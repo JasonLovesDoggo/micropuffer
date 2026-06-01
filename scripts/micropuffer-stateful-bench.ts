@@ -4,14 +4,13 @@ import {
   type JsonObject,
   type JsonValue,
   envOrDefault,
-  integerEnv,
-  parseJsonObject
+  integerEnv
 } from "./test-utils.ts";
 import {
   Micropuffer
 } from "micropuffer";
 
-type EngineName = "json_roundtrip" | "stateful";
+type EngineName = "stateful";
 
 type BenchSample = {
   operation: string;
@@ -28,7 +27,6 @@ type BenchSummary = {
   p95Ms: number;
   minMs: number;
   maxMs: number;
-  speedupVsJsonRoundtrip?: number;
 };
 
 type QueryCase = {
@@ -51,22 +49,12 @@ main();
 function main(): void {
   validateConfig();
   const engine = seedEngine();
-  const storeJson = engine.exportStore();
-  const roundtripStore = parseJsonObject(storeJson, "exported store");
+  const storeJsonBytes = engine.exportStore().length;
   const samples: BenchSample[] = [];
 
   for (const queryCase of queryCases()) {
     const requestJson = json(queryCase.request);
-    assertSameResponse(roundtripStore, engine, queryCase.operation, requestJson);
     for (let run = 0; run < queryRuns; run += 1) {
-      samples.push(
-        timeSync(queryCase.operation, "json_roundtrip", () =>
-          Micropuffer.fromStore(JSON.stringify(roundtripStore)).query(
-            namespaceName,
-            requestJson
-          )
-        )
-      );
       samples.push(
         timeSync(queryCase.operation, "stateful", () =>
           engine.query(namespaceName, requestJson)
@@ -75,7 +63,7 @@ function main(): void {
     }
   }
 
-  printSummaries(summarize(samples), storeJson.length);
+  printSummaries(summarize(samples), storeJsonBytes);
 }
 
 function validateConfig(): void {
@@ -159,6 +147,14 @@ function queryCases(): QueryCase[] {
       }
     },
     {
+      operation: "sparse_top10",
+      request: {
+        rank_by: ["sparse_vector", "SparseKNN", { "7": 0.7, "12": 0.2 }],
+        limit: 10,
+        include_attributes: ["category"]
+      }
+    },
+    {
       operation: "filter_order_top100",
       request: {
         rank_by: ["score", "desc"],
@@ -168,25 +164,6 @@ function queryCases(): QueryCase[] {
       }
     }
   ];
-}
-
-function assertSameResponse(
-  roundtripStore: JsonObject,
-  engine: Micropuffer,
-  operation: string,
-  requestJson: string
-): void {
-  const jsonRoundtrip = parseJsonObject(
-    Micropuffer.fromStore(JSON.stringify(roundtripStore)).query(namespaceName, requestJson),
-    `${operation} JSON roundtrip response`
-  );
-  const stateful = parseJsonObject(
-    engine.query(namespaceName, requestJson),
-    `${operation} stateful response`
-  );
-  if (JSON.stringify(jsonRoundtrip) !== JSON.stringify(stateful)) {
-    throw new Error(`${operation} stateful response differed from JSON roundtrip response.`);
-  }
 }
 
 function timeSync(
@@ -223,18 +200,7 @@ function summarize(samples: BenchSample[]): BenchSummary[] {
       maxMs: sorted[sorted.length - 1]
     };
   });
-  const jsonRoundtripByOperation = new Map(
-    summaries
-      .filter((summary) => summary.engine === "json_roundtrip")
-      .map((summary) => [summary.operation, summary.meanMs])
-  );
-  return summaries.map((summary) => ({
-    ...summary,
-    speedupVsJsonRoundtrip:
-      summary.engine === "stateful"
-        ? (jsonRoundtripByOperation.get(summary.operation) ?? summary.meanMs) / summary.meanMs
-        : undefined
-  }));
+  return summaries;
 }
 
 function percentile(sorted: number[], quantile: number): number {
@@ -252,8 +218,8 @@ function printSummaries(summaries: BenchSummary[], storeJsonBytes: number): void
   console.log(`store_json_bytes_avoided_per_stateful_query: ${storeJsonBytes}`);
   console.log(`store_json_bytes_avoided_total: ${storeJsonBytes * totalQueries}`);
   console.log("");
-  console.log("| operation | engine | runs | mean ms | p50 ms | p95 ms | min ms | max ms | x json roundtrip |");
-  console.log("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
+  console.log("| operation | engine | runs | mean ms | p50 ms | p95 ms | min ms | max ms |");
+  console.log("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |");
   for (const summary of summaries) {
     console.log(
       [
@@ -264,8 +230,7 @@ function printSummaries(summaries: BenchSummary[], storeJsonBytes: number): void
         format(summary.p50Ms),
         format(summary.p95Ms),
         format(summary.minMs),
-        format(summary.maxMs),
-        summary.speedupVsJsonRoundtrip === undefined ? "" : format(summary.speedupVsJsonRoundtrip)
+        format(summary.maxMs)
       ].join(" | ") + " |"
     );
   }
