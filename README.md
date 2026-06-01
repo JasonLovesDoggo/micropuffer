@@ -11,9 +11,9 @@ pnpm add micropuffer
 ```
 
 ```ts
-import { MicropufferEngine } from "micropuffer";
+import { Micropuffer } from "micropuffer";
 
-const engine = new MicropufferEngine();
+const engine = new Micropuffer();
 engine.write("local", JSON.stringify({ upsert_rows: [{ id: 1, vector: [1, 0] }] }));
 const response = engine.query("local", JSON.stringify({ rank_by: ["id", "asc"], limit: 10 }));
 const storeJson = engine.exportStore();

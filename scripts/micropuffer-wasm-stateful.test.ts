@@ -5,13 +5,13 @@ import {
   parseJsonObject
 } from "./test-utils";
 import {
-  MicropufferEngine
+  Micropuffer
 } from "micropuffer";
 
 const namespaceName = "micropuffer-stateful-wasm-test";
 
 test("stateful wasm engine owns query/write state in wasm memory", () => {
-  const engine = new MicropufferEngine();
+  const engine = new Micropuffer();
   const writeRequest: JsonObject = {
     distance_metric: "cosine_distance",
     schema: {
@@ -56,7 +56,7 @@ test("stateful wasm engine owns query/write state in wasm memory", () => {
   );
   expect(exported.rows).toHaveLength(2);
 
-  const replacement = MicropufferEngine.fromStore(engine.exportStore());
+  const replacement = Micropuffer.fromStore(engine.exportStore());
   expect(
     parseJsonObject(replacement.query(namespaceName, json(queryRequest)), "replacement query")
   ).toStrictEqual(
@@ -92,8 +92,8 @@ test("repeated stateful queries keep full store JSON out of the call loop", () =
   );
 });
 
-function seedEngine(rowCount: number): MicropufferEngine {
-  const engine = new MicropufferEngine();
+function seedEngine(rowCount: number): Micropuffer {
+  const engine = new Micropuffer();
   engine.write(
     namespaceName,
     json({

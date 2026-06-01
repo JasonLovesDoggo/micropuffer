@@ -8,7 +8,7 @@ import {
   parseJsonObject
 } from "./test-utils.ts";
 import {
-  MicropufferEngine
+  Micropuffer
 } from "micropuffer";
 
 type EngineName = "json_roundtrip" | "stateful";
@@ -61,7 +61,7 @@ function main(): void {
     for (let run = 0; run < queryRuns; run += 1) {
       samples.push(
         timeSync(queryCase.operation, "json_roundtrip", () =>
-          MicropufferEngine.fromStore(JSON.stringify(roundtripStore)).query(
+          Micropuffer.fromStore(JSON.stringify(roundtripStore)).query(
             namespaceName,
             requestJson
           )
@@ -84,8 +84,8 @@ function validateConfig(): void {
   }
 }
 
-function seedEngine(): MicropufferEngine {
-  const engine = new MicropufferEngine();
+function seedEngine(): Micropuffer {
+  const engine = new Micropuffer();
   engine.write(
     namespaceName,
     json({
@@ -172,12 +172,12 @@ function queryCases(): QueryCase[] {
 
 function assertSameResponse(
   roundtripStore: JsonObject,
-  engine: MicropufferEngine,
+  engine: Micropuffer,
   operation: string,
   requestJson: string
 ): void {
   const jsonRoundtrip = parseJsonObject(
-    MicropufferEngine.fromStore(JSON.stringify(roundtripStore)).query(namespaceName, requestJson),
+    Micropuffer.fromStore(JSON.stringify(roundtripStore)).query(namespaceName, requestJson),
     `${operation} JSON roundtrip response`
   );
   const stateful = parseJsonObject(

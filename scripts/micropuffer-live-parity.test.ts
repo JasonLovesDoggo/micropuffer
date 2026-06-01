@@ -13,7 +13,7 @@ import {
   requiredEnv
 } from "./test-utils";
 import {
-  MicropufferEngine
+  Micropuffer
 } from "micropuffer";
 
 
@@ -29,7 +29,7 @@ const apiKey = requiredEnv("TURBOPUFFER_API_KEY");
 const region = envOrDefault("TURBOPUFFER_REGION", "gcp-us-central1");
 const baseUrl = `https://${region}.turbopuffer.com`;
 
-const micropufferEngine = new MicropufferEngine();
+const micropuffer = new Micropuffer();
 
 afterAll(async () => {
   for (const namespace of namespacesToDelete) {
@@ -326,7 +326,7 @@ async function assertListNamespaceParity(): Promise<void> {
     `/v1/namespaces?prefix=${encodeURIComponent(namespaceName)}&page_size=10`
   );
   const mini = parseJsonObject(
-    micropufferEngine.listNamespaces(JSON.stringify({ prefix: namespaceName, page_size: 10 })),
+    micropuffer.listNamespaces(JSON.stringify({ prefix: namespaceName, page_size: 10 })),
     "micropuffer list response"
   );
   expect(namespaceIds(mini)).toStrictEqual(namespaceIds(live));
@@ -335,7 +335,7 @@ async function assertListNamespaceParity(): Promise<void> {
 async function assertMetadataParity(): Promise<void> {
   const live = await liveJson("GET", `/v1/namespaces/${encodeURIComponent(namespaceName)}/metadata`);
   const mini = parseJsonObject(
-    micropufferEngine.metadata(namespaceName),
+    micropuffer.metadata(namespaceName),
     "micropuffer metadata response"
   );
   expect(schemaTypes(mini)).toStrictEqual(schemaTypes(live));
@@ -344,7 +344,7 @@ async function assertMetadataParity(): Promise<void> {
 async function assertSchemaParity(): Promise<void> {
   const live = await liveJson("GET", `/v1/namespaces/${encodeURIComponent(namespaceName)}/schema`);
   const mini = parseJsonObject(
-    micropufferEngine.schema(namespaceName),
+    micropuffer.schema(namespaceName),
     "micropuffer schema response"
   );
   expect(schemaTypes({ schema: mini })).toStrictEqual(schemaTypes({ schema: live }));
@@ -364,7 +364,7 @@ async function assertSchemaUpdateParity(): Promise<void> {
     schemaUpdate
   );
   const mini = parseJsonObject(
-    micropufferEngine.updateSchema(namespaceName, JSON.stringify(schemaUpdate)),
+    micropuffer.updateSchema(namespaceName, JSON.stringify(schemaUpdate)),
     "micropuffer schema update response"
   );
   expect(schemaTypes({ schema: mini })).toStrictEqual(schemaTypes({ schema: live }));
@@ -376,7 +376,7 @@ async function assertWarmCacheParity(): Promise<void> {
     `/v1/namespaces/${encodeURIComponent(namespaceName)}/hint_cache_warm`
   );
   const mini = parseJsonObject(
-    micropufferEngine.warmCache(namespaceName),
+    micropuffer.warmCache(namespaceName),
     "micropuffer warm cache response"
   );
   expect(mini.status).toBe(live.status);
@@ -394,7 +394,7 @@ async function assertRecallParity(): Promise<void> {
     request
   );
   const mini = parseJsonObject(
-    micropufferEngine.recall(namespaceName, JSON.stringify(request)),
+    micropuffer.recall(namespaceName, JSON.stringify(request)),
     "micropuffer recall response"
   );
   expect(typeof live.avg_recall).toBe("number");
@@ -412,7 +412,7 @@ async function assertExplainQueryParity(): Promise<void> {
     limit: 3
   };
   const mini = parseJsonObject(
-    micropufferEngine.explainQuery(namespaceName, JSON.stringify(request)),
+    micropuffer.explainQuery(namespaceName, JSON.stringify(request)),
     "micropuffer explain query response"
   );
   expect(typeof mini.plan_text).toBe("string");
@@ -469,14 +469,14 @@ async function assertBranchParityIfAllowed(lookup: JsonObject): Promise<void> {
 
 function miniWrite(namespace: string, request: JsonObject): JsonObject {
   return parseJsonObject(
-    micropufferEngine.write(namespace, JSON.stringify(request)),
+    micropuffer.write(namespace, JSON.stringify(request)),
     "micropuffer write response"
   );
 }
 
 function miniQuery(namespace: string, request: JsonObject): JsonObject {
   return parseJsonObject(
-    micropufferEngine.query(namespace, JSON.stringify(request)),
+    micropuffer.query(namespace, JSON.stringify(request)),
     "micropuffer query response"
   );
 }

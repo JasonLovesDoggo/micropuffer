@@ -36,12 +36,12 @@ fn query_error(error: QueryError) -> JsValue {
 }
 
 #[wasm_bindgen]
-pub struct MicropufferEngine {
+pub struct Micropuffer {
     engine: CoreMicropuffer,
 }
 
 #[wasm_bindgen]
-impl MicropufferEngine {
+impl Micropuffer {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
         Self {
@@ -50,7 +50,7 @@ impl MicropufferEngine {
     }
 
     #[wasm_bindgen(js_name = fromStore)]
-    pub fn from_store(store_json: &str) -> Result<MicropufferEngine, JsValue> {
+    pub fn from_store(store_json: &str) -> Result<Micropuffer, JsValue> {
         Ok(Self {
             engine: CoreMicropuffer::from_store(read_store(store_json)?),
         })

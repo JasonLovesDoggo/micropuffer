@@ -12,7 +12,7 @@ import {
   requiredEnv
 } from "./test-utils";
 import {
-  MicropufferEngine
+  Micropuffer
 } from "micropuffer";
 
 const namespaceName = `micropuffer-live-fuzz-${Date.now()}-${process.pid}`;
@@ -24,7 +24,7 @@ const apiKey = requiredEnv("TURBOPUFFER_API_KEY");
 const region = envOrDefault("TURBOPUFFER_REGION", "gcp-us-central1");
 const baseUrl = `https://${region}.turbopuffer.com`;
 
-const micropufferEngine = new MicropufferEngine();
+const micropuffer = new Micropuffer();
 
 afterAll(async () => {
   await deleteLiveNamespace(namespaceName);
@@ -219,14 +219,14 @@ function isKnn(rankBy: JsonValue): boolean {
 
 function miniWrite(request: JsonObject): JsonObject {
   return parseJsonObject(
-    micropufferEngine.write(namespaceName, JSON.stringify(request)),
+    micropuffer.write(namespaceName, JSON.stringify(request)),
     "micropuffer write response"
   );
 }
 
 function miniQuery(request: JsonObject): JsonObject {
   return parseJsonObject(
-    micropufferEngine.query(namespaceName, JSON.stringify(request)),
+    micropuffer.query(namespaceName, JSON.stringify(request)),
     "micropuffer query response"
   );
 }
