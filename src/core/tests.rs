@@ -391,6 +391,64 @@ fn order_by_multiple_attributes_uses_stable_tie_breaks() {
 }
 
 #[test]
+fn indexed_eq_filter_uses_scalar_postings() {
+    let namespace = namespace();
+    let response = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["id", "asc"],
+            "filters": ["tenant_id", "Eq", "alpha"],
+            "limit": 10
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&response)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(1), json!(3)]
+    );
+    assert!(
+        namespace
+            .query_indexes
+            .borrow()
+            .equality
+            .contains_key("tenant_id")
+    );
+}
+
+#[test]
+fn indexed_order_by_preserves_multi_attribute_and_stable_id_order() {
+    let namespace: Namespace = serde_json::from_value(json!({
+        "name": "ordered",
+        "documents": [
+            {"id": "z", "tenant": "a", "score": 1},
+            {"id": "b", "tenant": "a", "score": 2},
+            {"id": "a", "tenant": "a", "score": 1},
+            {"id": "c", "tenant": "b", "score": 9}
+        ]
+    }))
+    .unwrap();
+    let response = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": [["tenant", "asc"], ["score", "desc"]],
+            "limit": 10
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&response)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("b"), json!("a"), json!("z"), json!("c")]
+    );
+    assert_eq!(namespace.query_indexes.borrow().order.len(), 1);
+}
+
+#[test]
 fn fts_schema_options_affect_bm25_and_token_filters() {
     let mut clone = Micropuffer::new();
     clone
@@ -647,6 +705,147 @@ fn column_writes_conditions_ref_new_and_by_filter_mutations_work() {
 }
 
 #[test]
+fn attribute_indexes_are_invalidated_after_upsert_patch_and_delete() {
+    let mut store = MiniStore {
+        namespaces: vec![
+            serde_json::from_value(json!({
+                "name": "indexed-writes",
+                "documents": [
+                    {"id": 1, "group": "keep", "score": 1},
+                    {"id": 2, "group": "skip", "score": 2},
+                    {"id": 3, "group": "keep", "score": 3}
+                ]
+            }))
+            .unwrap(),
+        ],
+    };
+    let first = query_store(
+        &store,
+        "indexed-writes",
+        &json!({
+            "rank_by": ["score", "asc"],
+            "filters": ["group", "Eq", "keep"],
+            "limit": 10
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&first)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(1), json!(3)]
+    );
+
+    write_store(
+        &mut store,
+        "indexed-writes",
+        &json!({
+            "patch_rows": [
+                {"id": 2, "group": "keep", "score": 0}
+            ]
+        }),
+    )
+    .unwrap();
+    let patched = query_store(
+        &store,
+        "indexed-writes",
+        &json!({
+            "rank_by": ["score", "asc"],
+            "filters": ["group", "Eq", "keep"],
+            "limit": 10
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&patched)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(2), json!(1), json!(3)]
+    );
+
+    write_store(&mut store, "indexed-writes", &json!({"deletes": [1]})).unwrap();
+    let deleted = query_store(
+        &store,
+        "indexed-writes",
+        &json!({
+            "rank_by": ["score", "asc"],
+            "filters": ["group", "Eq", "keep"],
+            "limit": 10
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&deleted)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(2), json!(3)]
+    );
+
+    write_store(
+        &mut store,
+        "indexed-writes",
+        &json!({
+            "upsert_rows": [
+                {"id": 4, "group": "keep", "score": -1}
+            ]
+        }),
+    )
+    .unwrap();
+    let upserted = query_store(
+        &store,
+        "indexed-writes",
+        &json!({
+            "rank_by": ["score", "asc"],
+            "filters": ["group", "Eq", "keep"],
+            "limit": 10
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&upserted)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(4), json!(2), json!(3)]
+    );
+}
+
+#[test]
+fn complex_filters_fall_back_to_full_evaluator() {
+    let namespace: Namespace = serde_json::from_value(json!({
+        "name": "fallback",
+        "documents": [
+            {"id": 1, "tenant_id": "beta", "title": "dashboard"},
+            {"id": 2, "tenant_id": "alpha", "title": "hybrid search"},
+            {"id": 3, "tenant_id": "alpha", "title": "plain search"}
+        ]
+    }))
+    .unwrap();
+    let response = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["id", "asc"],
+            "filters": ["Or", [
+                ["tenant_id", "Eq", "beta"],
+                ["title", "Fuzzy", "hybryd"]
+            ]],
+            "limit": 10
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&response)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(1), json!(2)]
+    );
+}
+
+#[test]
 fn writes_enforce_schema_types_and_vector_invariants() {
     let mut clone = Micropuffer::new();
     clone
@@ -812,6 +1011,7 @@ fn patch_by_filter_respects_partial_limit_and_rows_remaining() {
             pinning: None,
             branching_parent: None,
             documents,
+            query_indexes: Default::default(),
         }],
     });
     let too_many = clone
