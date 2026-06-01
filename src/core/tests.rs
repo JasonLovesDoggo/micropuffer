@@ -474,6 +474,36 @@ fn vector_queries_support_cosine_distance_and_base64_float32_vectors() {
         )
         .unwrap();
     assert_eq!(rows(&base64_response)[0]["id"], "array-doc");
+
+    clone
+        .write(
+            "euclidean-demo",
+            &json!({
+                "distance_metric": "euclidean",
+                "upsert_rows": [
+                    {"id": "unit", "vector": [1.0, 0.0]},
+                    {"id": "double", "vector": [0.0, 2.0]}
+                ]
+            }),
+        )
+        .unwrap();
+    let euclidean = clone
+        .query(
+            "euclidean-demo",
+            &json!({
+                "rank_by": ["vector", "ANN", [0.0, 0.0]],
+                "limit": 2
+            }),
+        )
+        .unwrap();
+    assert_eq!(rows(&euclidean)[0]["id"], "unit");
+    assert_eq!(rows(&euclidean)[0]["$dist"], 1.0);
+    assert_eq!(rows(&euclidean)[1]["id"], "double");
+    assert_eq!(rows(&euclidean)[1]["$dist"], 2.0);
+    assert_eq!(
+        clone.metadata("euclidean-demo").unwrap()["schema"]["vector"]["ann"]["distance_metric"],
+        "euclidean"
+    );
 }
 
 #[test]

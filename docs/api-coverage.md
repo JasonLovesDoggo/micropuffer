@@ -27,6 +27,7 @@ Sources checked:
   - scalar namespace rejection when adding a vector later
 - `POST /v2/namespaces/:namespace/query`
   - `ANN`
+  - distance metrics: `cosine_distance`, `euclidean`, `euclidean_squared`
   - `kNN`
   - `BM25`
   - BM25 array-query rejection for word-tokenized fields
