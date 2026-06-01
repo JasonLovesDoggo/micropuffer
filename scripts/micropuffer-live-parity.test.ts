@@ -21,7 +21,16 @@ const namespaceName = `${NAMESPACE_PREFIX}-${Date.now()}-${process.pid}`;
 const copyNamespaceName = `${namespaceName}-copy`;
 const branchNamespaceName = `${namespaceName}-branch`;
 const euclideanNamespaceName = `${namespaceName}-euclidean`;
-const namespacesToDelete = [namespaceName, copyNamespaceName, branchNamespaceName, euclideanNamespaceName];
+const uuidNamespaceName = `${namespaceName}-uuid`;
+const uuidInvalidNamespaceName = `${namespaceName}-uuid-invalid`;
+const namespacesToDelete = [
+  namespaceName,
+  copyNamespaceName,
+  branchNamespaceName,
+  euclideanNamespaceName,
+  uuidNamespaceName,
+  uuidInvalidNamespaceName
+];
 
 loadEnv();
 
@@ -41,6 +50,8 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
   await deleteLiveNamespace(namespaceName);
   await deleteLiveNamespace(copyNamespaceName);
   await deleteLiveNamespace(branchNamespaceName);
+  await deleteLiveNamespace(uuidNamespaceName);
+  await deleteLiveNamespace(uuidInvalidNamespaceName);
 
   const seedWrite: JsonObject = {
     distance_metric: "cosine_distance",
@@ -302,6 +313,7 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
   await assertErrorParity();
   await assertInvalidNamespaceParity();
   await assertEuclideanDistanceMetricParity();
+  await assertUuidIdSchemaParity();
   await assertBranchParityIfAllowed(afterDeleteLookup);
 });
 
@@ -978,6 +990,99 @@ async function assertEuclideanDistanceMetricParity(): Promise<void> {
       requireObject(miniMetadata.schema, "micropuffer euclidean metadata schema").vector,
       "micropuffer vector schema"
     ).ann
+  );
+}
+
+async function assertUuidIdSchemaParity(): Promise<void> {
+  await deleteLiveNamespace(uuidNamespaceName);
+  await deleteLiveNamespace(uuidInvalidNamespaceName);
+
+  const invalidFirstWrite: JsonObject = {
+    schema: { id: "uuid", title: "string" },
+    upsert_rows: [{ id: "not-a-uuid", title: "bad" }]
+  };
+  expectErrorParity(
+    miniWriteError(uuidInvalidNamespaceName, invalidFirstWrite),
+    await liveError("POST", `/v2/namespaces/${encodeURIComponent(uuidInvalidNamespaceName)}`, invalidFirstWrite)
+  );
+
+  const write: JsonObject = {
+    schema: { id: "uuid", title: "string" },
+    upsert_rows: [
+      { id: "769C134D-07B8-4225-954A-B6CC5FFC320C", title: "row-0" },
+      { id: "769c134d07b84225954ab6cc5ffc320d", title: "row-1" },
+      { id: "{769c134d-07b8-4225-954a-b6cc5ffc320e}", title: "row-2" },
+      { id: "urn:uuid:769c134d-07b8-4225-954a-b6cc5ffc320f", title: "row-3" }
+    ],
+    return_affected_ids: true
+  };
+  expectJsonParity(await liveWrite(uuidNamespaceName, write), miniWrite(uuidNamespaceName, write));
+
+  const lookup: JsonObject = {
+    rank_by: ["title", "asc"],
+    limit: 10,
+    include_attributes: ["title"]
+  };
+  expectJsonParity(await liveQuery(uuidNamespaceName, lookup), miniQuery(uuidNamespaceName, lookup));
+
+  const liveSchema = await liveJson("GET", `/v1/namespaces/${encodeURIComponent(uuidNamespaceName)}/schema`);
+  const miniSchema = parseJsonObject(
+    micropuffer.schema(uuidNamespaceName),
+    "micropuffer uuid schema response"
+  );
+  expect(requireObject(miniSchema.id, "micropuffer uuid id schema").type).toBe(
+    requireObject(liveSchema.id, "live uuid id schema").type
+  );
+
+  const patchRows: JsonObject = {
+    patch_rows: [
+      { id: "769C134D-07B8-4225-954A-B6CC5FFC320C", title: "patched" }
+    ],
+    return_affected_ids: true
+  };
+  expectJsonParity(await liveWrite(uuidNamespaceName, patchRows), miniWrite(uuidNamespaceName, patchRows));
+
+  const patchColumns: JsonObject = {
+    patch_columns: {
+      id: ["769c134d07b84225954ab6cc5ffc320d"],
+      title: ["column patched"]
+    },
+    return_affected_ids: true
+  };
+  expectJsonParity(await liveWrite(uuidNamespaceName, patchColumns), miniWrite(uuidNamespaceName, patchColumns));
+
+  const deleteByUrn: JsonObject = {
+    deletes: ["urn:uuid:769c134d-07b8-4225-954a-b6cc5ffc320f"],
+    return_affected_ids: true
+  };
+  expectJsonParity(await liveWrite(uuidNamespaceName, deleteByUrn), miniWrite(uuidNamespaceName, deleteByUrn));
+
+  const invalidDelete: JsonObject = { deletes: ["not-a-uuid"] };
+  expectErrorParity(
+    miniWriteError(uuidNamespaceName, invalidDelete),
+    await liveError("POST", `/v2/namespaces/${encodeURIComponent(uuidNamespaceName)}`, invalidDelete)
+  );
+
+  const invalidPatchColumns: JsonObject = {
+    patch_columns: {
+      id: ["urn:uuid:{769c134d-07b8-4225-954a-b6cc5ffc320c}"],
+      title: ["bad"]
+    }
+  };
+  expectErrorParity(
+    miniWriteError(uuidNamespaceName, invalidPatchColumns),
+    await liveError("POST", `/v2/namespaces/${encodeURIComponent(uuidNamespaceName)}`, invalidPatchColumns)
+  );
+
+  const duplicateUuidWrite: JsonObject = {
+    upsert_rows: [
+      { id: "769C134D-07B8-4225-954A-B6CC5FFC320C", title: "dupe-0" },
+      { id: "769c134d-07b8-4225-954a-b6cc5ffc320c", title: "dupe-1" }
+    ]
+  };
+  expectErrorParity(
+    miniWriteError(uuidNamespaceName, duplicateUuidWrite),
+    await liveError("POST", `/v2/namespaces/${encodeURIComponent(uuidNamespaceName)}`, duplicateUuidWrite)
   );
 }
 

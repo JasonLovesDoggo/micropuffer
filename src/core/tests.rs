@@ -1950,6 +1950,149 @@ fn writes_enforce_schema_types_and_vector_invariants() {
 }
 
 #[test]
+fn uuid_id_schema_normalizes_and_rejects_written_ids() {
+    let mut clone = Micropuffer::new();
+    let invalid_first_write = clone
+        .write(
+            "uuid-invalid",
+            &json!({
+                "schema": {"id": "uuid", "title": "string"},
+                "upsert_rows": [{"id": "not-a-uuid", "title": "bad"}]
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(invalid_first_write.status_code(), 400);
+    assert_eq!(
+        invalid_first_write.to_string(),
+        "💔 namespace ID type is uuid, but a written ID could not be parsed as uuid"
+    );
+    assert_eq!(
+        clone.metadata("uuid-invalid").unwrap_err().status_code(),
+        404
+    );
+
+    let write = clone
+        .write(
+            "uuid-demo",
+            &json!({
+                "schema": {"id": "uuid", "title": "string"},
+                "upsert_rows": [
+                    {"id": "769C134D-07B8-4225-954A-B6CC5FFC320C", "title": "row-0"},
+                    {"id": "769c134d07b84225954ab6cc5ffc320d", "title": "row-1"},
+                    {"id": "{769c134d-07b8-4225-954a-b6cc5ffc320e}", "title": "row-2"},
+                    {"id": "urn:uuid:769c134d-07b8-4225-954a-b6cc5ffc320f", "title": "row-3"}
+                ],
+                "return_affected_ids": true
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        write["upserted_ids"],
+        json!([
+            "769c134d-07b8-4225-954a-b6cc5ffc320c",
+            "769c134d-07b8-4225-954a-b6cc5ffc320d",
+            "769c134d-07b8-4225-954a-b6cc5ffc320e",
+            "769c134d-07b8-4225-954a-b6cc5ffc320f"
+        ])
+    );
+    assert_eq!(clone.schema("uuid-demo").unwrap()["id"]["type"], "uuid");
+
+    let query = clone
+        .query(
+            "uuid-demo",
+            &json!({
+                "rank_by": ["title", "asc"],
+                "limit": 10,
+                "include_attributes": ["title"]
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        rows(&query)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![
+            json!("769c134d-07b8-4225-954a-b6cc5ffc320c"),
+            json!("769c134d-07b8-4225-954a-b6cc5ffc320d"),
+            json!("769c134d-07b8-4225-954a-b6cc5ffc320e"),
+            json!("769c134d-07b8-4225-954a-b6cc5ffc320f")
+        ]
+    );
+
+    let patched = clone
+        .write(
+            "uuid-demo",
+            &json!({
+                "patch_rows": [
+                    {"id": "769C134D-07B8-4225-954A-B6CC5FFC320C", "title": "patched"}
+                ],
+                "return_affected_ids": true
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        patched["patched_ids"],
+        json!(["769c134d-07b8-4225-954a-b6cc5ffc320c"])
+    );
+
+    let column_patch = clone
+        .write(
+            "uuid-demo",
+            &json!({
+                "patch_columns": {
+                    "id": ["769c134d07b84225954ab6cc5ffc320d"],
+                    "title": ["column patched"]
+                },
+                "return_affected_ids": true
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        column_patch["patched_ids"],
+        json!(["769c134d-07b8-4225-954a-b6cc5ffc320d"])
+    );
+
+    let deleted = clone
+        .write(
+            "uuid-demo",
+            &json!({
+                "deletes": ["urn:uuid:769c134d-07b8-4225-954a-b6cc5ffc320f"],
+                "return_affected_ids": true
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        deleted["deleted_ids"],
+        json!(["769c134d-07b8-4225-954a-b6cc5ffc320f"])
+    );
+
+    let invalid_existing_write = clone
+        .write("uuid-demo", &json!({"deletes": ["not-a-uuid"]}))
+        .unwrap_err();
+    assert_eq!(
+        invalid_existing_write.to_string(),
+        "💔 namespace ID type is uuid, but a written ID could not be parsed as uuid"
+    );
+
+    let duplicate = clone
+        .write(
+            "uuid-demo",
+            &json!({
+                "upsert_rows": [
+                    {"id": "769C134D-07B8-4225-954A-B6CC5FFC320C", "title": "dupe-0"},
+                    {"id": "769c134d-07b8-4225-954a-b6cc5ffc320c", "title": "dupe-1"}
+                ]
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(
+        duplicate.to_string(),
+        "💔 This upsert contains duplicate document IDs and was not written. You should ensure that individual upserts do not include duplicate documents. The duplicated IDs in this batch were the following: 769c134d-07b8-4225-954a-b6cc5ffc320c"
+    );
+}
+
+#[test]
 fn write_responses_include_requested_zero_counts_and_query_billing() {
     let mut clone = Micropuffer::new();
     clone
