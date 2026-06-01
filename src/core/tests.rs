@@ -1177,6 +1177,56 @@ fn write_id_index_preserves_numeric_id_matching_for_loaded_stores() {
 }
 
 #[test]
+fn write_id_index_keeps_large_u64_ids_distinct() {
+    let first_id = 9_007_199_254_740_992_u64;
+    let second_id = 9_007_199_254_740_993_u64;
+    let mut store = MiniStore::default();
+    let upsert = write_store(
+        &mut store,
+        "large-ids",
+        &json!({
+            "upsert_rows": [
+                {"id": first_id, "score": 1},
+                {"id": second_id, "score": 2}
+            ]
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(upsert["rows_upserted"], 2);
+    assert_eq!(store.namespace("large-ids").unwrap().documents.len(), 2);
+
+    let patch = write_store(
+        &mut store,
+        "large-ids",
+        &json!({
+            "patch_rows": [
+                {"id": first_id, "score": 10},
+                {"id": second_id, "score": 20}
+            ]
+        }),
+    )
+    .unwrap();
+    assert_eq!(patch["rows_patched"], 2);
+
+    let response = query_store(
+        &store,
+        "large-ids",
+        &json!({
+            "rank_by": ["score", "asc"],
+            "limit": 2,
+            "include_attributes": true
+        }),
+    )
+    .unwrap();
+    let rows = rows(&response);
+    assert_eq!(rows[0]["id"], first_id);
+    assert_eq!(rows[0]["score"], 10);
+    assert_eq!(rows[1]["id"], second_id);
+    assert_eq!(rows[1]["score"], 20);
+}
+
+#[test]
 #[ignore = "performance evidence; run explicitly"]
 fn write_100k_new_upserts_completes_in_one_batch() {
     let mut rows = Vec::with_capacity(100_000);

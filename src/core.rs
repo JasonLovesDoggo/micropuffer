@@ -2180,11 +2180,23 @@ fn validate_attribute_name(name: &str) -> Result<(), QueryError> {
 
 fn id_key(id: &Value) -> String {
     match id {
-        Value::Number(_) => value_as_f64(id)
-            .map(|number| format!("number:{number}"))
+        Value::Number(number) => number
+            .as_u64()
+            .map(|id| format!("number:{id}"))
+            .or_else(|| legacy_float_id_key(number))
             .unwrap_or_else(|| id.to_string()),
         Value::String(text) => format!("string:{text}"),
         _ => id.to_string(),
+    }
+}
+
+fn legacy_float_id_key(number: &Number) -> Option<String> {
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    let id = number.as_f64()?;
+    if id.is_finite() && (0.0..=MAX_SAFE_INTEGER).contains(&id) && id.fract() == 0.0 {
+        Some(format!("number:{}", id as u64))
+    } else {
+        None
     }
 }
 
