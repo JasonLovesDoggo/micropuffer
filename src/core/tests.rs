@@ -1643,6 +1643,56 @@ fn indexed_candidates_are_rechecked_by_filter_evaluator() {
 }
 
 #[test]
+fn indexed_order_continues_past_stale_candidate_until_limit_is_satisfied() {
+    let namespace: Namespace = serde_json::from_value(json!({
+        "name": "source-of-truth-limit",
+        "documents": [
+            {"id": 1, "group": "skip", "score": 1},
+            {"id": 2, "group": "keep", "score": 2},
+            {"id": 3, "group": "keep", "score": 3}
+        ]
+    }))
+    .unwrap();
+    query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["score", "asc"],
+            "filters": ["group", "Eq", "keep"],
+            "limit": 10
+        }),
+    )
+    .unwrap();
+
+    namespace
+        .query_indexes
+        .guard()
+        .equality
+        .get_mut("group")
+        .unwrap()
+        .postings
+        .entry(ScalarEqKey::String("keep".to_string()))
+        .or_default()
+        .insert(0);
+
+    let response = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["score", "asc"],
+            "filters": ["group", "Eq", "keep"],
+            "limit": 1
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&response)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(2)]
+    );
+}
+
+#[test]
 fn empty_and_filter_falls_back_to_full_evaluator() {
     let namespace: Namespace = serde_json::from_value(json!({
         "name": "empty-and",
@@ -3636,6 +3686,7 @@ fn write_100k_new_upserts_completes_in_one_batch() {
         &mut store,
         "bulk-upsert",
         &json!({
+            "distance_metric": "cosine_distance",
             "upsert_rows": rows
         }),
     )
@@ -3676,8 +3727,12 @@ fn stateful_100k_dense_sparse_query_benchmark() {
         .write(
             "stateful-100k",
             &json!({
+                "distance_metric": "cosine_distance",
                 "schema": {
-                    "vector": format!("[{dimensions}]f32"),
+                    "vector": {
+                        "type": format!("[{dimensions}]f32"),
+                        "ann": true
+                    },
                     "sparse_vector": {
                         "type": "{}f16",
                         "sparse_knn": {"distance_metric": "dot_product"}

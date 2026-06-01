@@ -3548,16 +3548,23 @@ fn validate_included_attributes(
     let Some(Value::Array(attributes)) = object.get("include_attributes") else {
         return Ok(());
     };
-    let schema = schema_with_id(namespace);
     for attribute in attributes {
         let name = as_string(attribute, "include_attributes item")?;
-        if !schema.contains_key(name) {
+        if !namespace_has_attribute(namespace, name) {
             return Err(QueryError::new(format!(
                 "💔 attribute \"{name}\" not found in schema, cannot be part of `include_attributes`. consider passing `include_attributes=True` to return all attribute data instead"
             )));
         }
     }
     Ok(())
+}
+
+fn namespace_has_attribute(namespace: &Namespace, name: &str) -> bool {
+    name == "id"
+        || namespace.schema.contains_key(name)
+        || namespace.documents.iter().any(|document| {
+            document_attr(document, name).is_some() || document.typed.dense_vector(name).is_some()
+        })
 }
 
 fn serde_type_name(value: &Value) -> String {
@@ -4160,27 +4167,23 @@ fn indexed_order_ranked<'a>(
     if filter_candidates.as_ref().is_some_and(Vec::is_empty) {
         return Ok(Some(Vec::new()));
     }
-    let order = order_index_positions(namespace, &order_key, filter_candidates.as_deref(), limit);
+    let order = order_index_positions(
+        namespace,
+        &order_key,
+        filter_candidates.as_deref(),
+        filters,
+        limit,
+    )?;
     let mut ranked = Vec::with_capacity(order.len());
     for index in order {
         let document = namespace
             .documents
             .get(index)
             .ok_or_else(|| QueryError::new("order index referenced a missing document."))?;
-        if !filters
-            .map(|filter| eval_filter_with_schema(document, filter, Some(&namespace.schema)))
-            .transpose()?
-            .unwrap_or(true)
-        {
-            continue;
-        }
         ranked.push(RankedDocument {
             doc: document,
             score: 0.0,
         });
-        if ranked.len() == limit {
-            break;
-        }
     }
     Ok(Some(ranked))
 }
@@ -4359,31 +4362,36 @@ fn order_index_positions(
     namespace: &Namespace,
     key: &OrderIndexKey,
     filter_candidates: Option<&[usize]>,
+    filters: Option<&Value>,
     limit: usize,
-) -> Vec<usize> {
+) -> Result<Vec<usize>, QueryError> {
     let mut indexes = namespace.query_indexes.guard();
     let order = indexes
         .order
         .entry(key.clone())
         .or_insert_with(|| build_order_index(namespace, key));
-    let position_limit = if filter_candidates.is_some() {
-        order.len()
-    } else {
-        limit
-    };
-    let mut positions = Vec::with_capacity(position_limit.min(order.len()));
+    let mut positions = Vec::with_capacity(limit.min(order.len()));
     for entry in order {
         if let Some(candidates) = filter_candidates
             && candidates.binary_search(&entry.doc_index).is_err()
         {
             continue;
         }
+        if let Some(filter) = filters {
+            let document = namespace
+                .documents
+                .get(entry.doc_index)
+                .ok_or_else(|| QueryError::new("order index referenced a missing document."))?;
+            if !eval_filter_with_schema(document, filter, Some(&namespace.schema))? {
+                continue;
+            }
+        }
         positions.push(entry.doc_index);
-        if positions.len() == position_limit {
+        if positions.len() == limit {
             break;
         }
     }
-    positions
+    Ok(positions)
 }
 
 fn build_order_index(namespace: &Namespace, key: &OrderIndexKey) -> Vec<OrderIndexEntry> {
