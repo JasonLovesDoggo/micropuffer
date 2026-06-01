@@ -41,8 +41,10 @@ Sources checked:
   - projections with `include_attributes: true`
   - projections with `include_attributes: false`
   - projections with `include_attributes: []`
+  - `include_attributes` missing-attribute rejection
   - projections with `exclude_attributes`
   - `vector_encoding: "base64"` output
+  - `consistency.level` validation for `strong` and `eventual`
   - `limit.per` for order-by-attribute queries
   - ungrouped count aggregation
   - ungrouped sum aggregation
@@ -61,6 +63,7 @@ Sources checked:
 - `GET /v1/namespaces/:namespace/hint_cache_warm`, status parity only
 - path namespace validation for invalid characters and names over 128 characters
 - exact status/body parity for include/exclude projection validation
+- exact status/body parity for selected consistency validation failures
 - exact status/body parity for selected Serde-style query validation failures
 - exact status/body parity for missing-namespace query failures
 - exact status/body parity for selected write validation failures
