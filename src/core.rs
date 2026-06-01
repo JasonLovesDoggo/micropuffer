@@ -1587,9 +1587,31 @@ fn merge_schema(namespace: &mut Namespace, schema: &Map<String, Value>) -> Resul
         }
         namespace
             .schema
-            .insert(attribute.clone(), definition.clone());
+            .insert(attribute.clone(), sanitize_schema_definition(definition));
     }
     validate_vector_column_count(&namespace.schema)
+}
+
+fn sanitize_schema_definition(definition: &Value) -> Value {
+    let Some(object) = definition.as_object() else {
+        return definition.clone();
+    };
+    let mut sanitized = Map::new();
+    for key in [
+        "type",
+        "filterable",
+        "regex",
+        "glob",
+        "fuzzy",
+        "full_text_search",
+        "ann",
+        "sparse_knn",
+    ] {
+        if let Some(value) = object.get(key) {
+            sanitized.insert(key.to_string(), value.clone());
+        }
+    }
+    Value::Object(sanitized)
 }
 
 fn refresh_inferred_schema(namespace: &mut Namespace) -> Result<(), QueryError> {
@@ -1891,17 +1913,6 @@ fn validate_schema_definition(
     let Some(object) = definition.as_object() else {
         return Ok(());
     };
-    for key in object.keys() {
-        match key.as_str() {
-            "type" | "filterable" | "regex" | "glob" | "fuzzy" | "full_text_search" | "ann"
-            | "sparse_knn" => {}
-            _ => {
-                return Err(QueryError::new(format!(
-                    "schema.{attribute}.{key} is not supported."
-                )));
-            }
-        }
-    }
     if let Some(filterable) = object.get("filterable")
         && filterable.as_bool().is_none()
     {
