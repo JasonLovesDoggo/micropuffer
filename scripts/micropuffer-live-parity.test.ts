@@ -635,7 +635,7 @@ async function assertWarmCacheParity(): Promise<void> {
 async function assertRecallParity(): Promise<void> {
   const request: JsonObject = {
     num: 1,
-    top_k: 2,
+    top_k: 1,
     filters: ["public", "Eq", 1]
   };
   const live = await liveJson(
@@ -647,12 +647,7 @@ async function assertRecallParity(): Promise<void> {
     micropuffer.recall(namespaceName, JSON.stringify(request)),
     "micropuffer recall response"
   );
-  expect(typeof live.avg_recall).toBe("number");
-  expect(typeof live.avg_exhaustive_count).toBe("number");
-  expect(typeof live.avg_ann_count).toBe("number");
-  expect(mini.avg_recall).toBe(1);
-  expect(typeof mini.avg_exhaustive_count).toBe("number");
-  expect(typeof mini.avg_ann_count).toBe("number");
+  expectJsonParity(live, mini);
 }
 
 async function assertExplainQueryParity(): Promise<void> {

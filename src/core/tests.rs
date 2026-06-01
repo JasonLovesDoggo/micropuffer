@@ -3433,6 +3433,18 @@ fn recall_and_explain_query_match_debug_endpoint_shapes() {
             .len(),
         2
     );
+    let capped_recall = clone
+        .recall(
+            "debug",
+            &json!({
+                "top_k": 1,
+                "filters": ["public", "Eq", 1]
+            }),
+        )
+        .unwrap();
+    assert_eq!(capped_recall["avg_recall"], 1.0);
+    assert_eq!(capped_recall["avg_exhaustive_count"], 1.0);
+    assert_eq!(capped_recall["avg_ann_count"], 1.0);
 
     let explained = clone
         .explain_query(

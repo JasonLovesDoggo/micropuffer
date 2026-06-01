@@ -56,7 +56,7 @@ Sources checked:
   - grouped count aggregation
   - grouped aggregation default `top_k`
   - multi-query
-- `POST /v1/namespaces/:namespace/_debug/recall`, response-shape parity only
+- `POST /v1/namespaces/:namespace/_debug/recall`, exact basic response parity for deterministic small namespaces
 - `POST /v2/namespaces/:namespace/explain_query`, local shape only; live returned `400` for the temp namespace/index state
 - deprecated `GET /v1/namespaces/:namespace` columnar export
 - `GET /v1/namespaces`, including prefix, query-string `page_size` parsing, live-style `cursor` pagination, exhausted-page `next_cursor: null`, page-size error parity, and malformed-cursor error parity
