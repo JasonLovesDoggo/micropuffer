@@ -450,6 +450,29 @@ async function assertSchemaUpdateParity(): Promise<void> {
     "micropuffer schema update response"
   );
   expect(schemaTypes({ schema: mini })).toStrictEqual(schemaTypes({ schema: live }));
+
+  const unknownSchemaOption: JsonObject = {
+    category: {
+      type: "string",
+      regex: true,
+      filterable: true,
+      not_a_real_schema_option: true
+    }
+  };
+  const liveUnknown = await liveJson(
+    "POST",
+    `/v1/namespaces/${encodeURIComponent(namespaceName)}/schema`,
+    unknownSchemaOption
+  );
+  const miniUnknown = parseJsonObject(
+    micropuffer.updateSchema(namespaceName, JSON.stringify(unknownSchemaOption)),
+    "micropuffer schema update response"
+  );
+  expect(requireObject(miniUnknown.category, "micropuffer category schema")).toStrictEqual(
+    requireObject(liveUnknown.category, "live category schema")
+  );
+  expect(requireObject(miniUnknown.category, "micropuffer category schema").not_a_real_schema_option)
+    .toBeUndefined();
 }
 
 async function assertWarmCacheParity(): Promise<void> {

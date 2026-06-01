@@ -2571,6 +2571,29 @@ fn schema_update_and_warm_cache_match_workspace_shapes() {
     assert_eq!(updated["title"]["full_text_search"]["tokenizer"], "word_v3");
     assert_eq!(updated["title"]["regex"], true);
 
+    let unknown_option = clone
+        .update_schema(
+            "schema-api",
+            &json!({
+                "title": {
+                    "type": "string",
+                    "full_text_search": true,
+                    "not_a_real_schema_option": true
+                }
+            }),
+        )
+        .unwrap();
+    assert!(
+        unknown_option["title"]
+            .get("not_a_real_schema_option")
+            .is_none()
+    );
+    assert!(
+        clone.store().namespace("schema-api").unwrap().schema["title"]
+            .get("not_a_real_schema_option")
+            .is_none()
+    );
+
     let warmed = clone.warm_cache("schema-api").unwrap();
     assert_eq!(warmed["status"], "ACCEPTED");
 }
