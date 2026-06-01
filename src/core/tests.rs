@@ -74,6 +74,36 @@ fn ann_ranks_by_squared_distance_and_projects_attributes() {
 }
 
 #[test]
+fn top_k_selection_preserves_exact_tie_order() {
+    let namespace: Namespace = serde_json::from_value(json!({
+        "name": "ties",
+        "documents": [
+            {"id": "d", "vector": [1.0, 1.0]},
+            {"id": "b", "vector": [1.0, 1.0]},
+            {"id": "c", "vector": [1.0, 1.0]},
+            {"id": "a", "vector": [1.0, 1.0]}
+        ]
+    }))
+    .unwrap();
+    let response = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["vector", "ANN", [1.0, 1.0]],
+            "limit": 2
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(
+        rows(&response)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("a"), json!("b")]
+    );
+}
+
+#[test]
 fn knn_requires_filters() {
     let error = query_namespace(
         &namespace(),
