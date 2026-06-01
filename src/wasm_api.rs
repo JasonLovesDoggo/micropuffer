@@ -1,3 +1,4 @@
+use crate::core::{MAX_NAMESPACE_PAGE_SIZE, validate_namespace_page_size};
 use crate::{Micropuffer as CoreMicropuffer, MiniStore, QueryError};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -23,12 +24,50 @@ fn write_json(value: impl Serialize) -> Result<String, JsValue> {
     serde_json::to_string(&value).map_err(js_error)
 }
 
-fn page_size_from_request(request: &Value) -> Result<usize, JsValue> {
-    match request.get("page_size").and_then(Value::as_u64) {
-        Some(page_size) => usize::try_from(page_size)
-            .map_err(|_| JsValue::from_str("page_size is too large for this runtime.")),
-        None => Ok(1000),
+const DEFAULT_NAMESPACE_PAGE_SIZE: usize = 100;
+
+fn page_size_from_request(request: &Value) -> Result<usize, QueryError> {
+    let Some(page_size) = request.get("page_size") else {
+        return Ok(DEFAULT_NAMESPACE_PAGE_SIZE);
+    };
+    match page_size {
+        Value::Null => Ok(DEFAULT_NAMESPACE_PAGE_SIZE),
+        Value::Number(number) => {
+            let Some(page_size) = number.as_u64() else {
+                return Err(invalid_page_size_query());
+            };
+            namespace_page_size_from_u64(page_size)
+        }
+        Value::String(raw) => {
+            if raw.is_empty() {
+                return Err(QueryError::invalid_url(
+                    "Failed to deserialize query string: cannot parse integer from empty string",
+                ));
+            }
+            namespace_page_size_from_u64(raw.parse::<u64>().map_err(|error| {
+                QueryError::invalid_url(format!("Failed to deserialize query string: {error}"))
+            })?)
+        }
+        _ => Err(invalid_page_size_query()),
     }
+}
+
+fn namespace_page_size_from_u64(page_size: u64) -> Result<usize, QueryError> {
+    if page_size > MAX_NAMESPACE_PAGE_SIZE as u64 {
+        return Err(QueryError::new(format!(
+            "💔 Page size must be in range 1..={MAX_NAMESPACE_PAGE_SIZE}, was {page_size}"
+        )));
+    }
+    let page_size = usize::try_from(page_size).map_err(|_| {
+        QueryError::new(format!(
+            "💔 Page size must be in range 1..={MAX_NAMESPACE_PAGE_SIZE}, was {page_size}"
+        ))
+    })?;
+    validate_namespace_page_size(page_size)
+}
+
+fn invalid_page_size_query() -> QueryError {
+    QueryError::invalid_url("Failed to deserialize query string: invalid digit found in string")
 }
 
 fn query_error(error: QueryError) -> JsValue {
@@ -158,7 +197,7 @@ impl Micropuffer {
         let request = read_request(request_json)?;
         let prefix = request.get("prefix").and_then(Value::as_str);
         let cursor = request.get("cursor").and_then(Value::as_str);
-        let page_size = page_size_from_request(&request)?;
+        let page_size = page_size_from_request(&request).map_err(query_error)?;
         write_json(
             self.engine
                 .list_namespaces(prefix, cursor, page_size)
@@ -171,7 +210,10 @@ impl Micropuffer {
         let request = read_request(request_json)?;
         let prefix = request.get("prefix").and_then(Value::as_str);
         let cursor = request.get("cursor").and_then(Value::as_str);
-        let page_size = page_size_from_request(&request)?;
+        let page_size = match page_size_from_request(&request) {
+            Ok(page_size) => page_size,
+            Err(error) => return http_response(Err(error)),
+        };
         http_response(self.engine.list_namespaces(prefix, cursor, page_size))
     }
 

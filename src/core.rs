@@ -18,6 +18,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 const PATCH_BY_FILTER_LIMIT: usize = 50_000;
 const DELETE_BY_FILTER_LIMIT: usize = 5_000_000;
+pub(crate) const MAX_NAMESPACE_PAGE_SIZE: usize = 1000;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct MiniStore {
@@ -85,7 +86,7 @@ impl Micropuffer {
         cursor: Option<&str>,
         page_size: usize,
     ) -> Result<Value, QueryError> {
-        let page_size = page_size.clamp(1, 1000);
+        let page_size = validate_namespace_page_size(page_size)?;
         let mut names = self
             .store
             .namespaces
@@ -111,14 +112,12 @@ impl Micropuffer {
             .collect::<Vec<_>>();
         let mut response = Map::new();
         response.insert("namespaces".to_string(), Value::Array(page));
-        if page_names.len() == page_size
-            && let Some(cursor_name) = page_names.last()
-        {
-            response.insert(
-                "next_cursor".to_string(),
-                Value::String(namespace_list_cursor(cursor_name)),
-            );
-        }
+        let next_cursor = page_names
+            .last()
+            .filter(|_| page_names.len() == page_size)
+            .map(|cursor_name| Value::String(namespace_list_cursor(cursor_name)))
+            .unwrap_or(Value::Null);
+        response.insert("next_cursor".to_string(), next_cursor);
         Ok(Value::Object(response))
     }
 
@@ -183,6 +182,15 @@ impl Micropuffer {
 
 fn namespace_not_found(name: &str) -> QueryError {
     QueryError::not_found(format!("🤷 namespace '{name}' was not found"))
+}
+
+pub(crate) fn validate_namespace_page_size(page_size: usize) -> Result<usize, QueryError> {
+    if !(1..=MAX_NAMESPACE_PAGE_SIZE).contains(&page_size) {
+        return Err(QueryError::new(format!(
+            "💔 Page size must be in range 1..={MAX_NAMESPACE_PAGE_SIZE}, was {page_size}"
+        )));
+    }
+    Ok(page_size)
 }
 
 fn namespace_list_start(names: &[&str], cursor: Option<&str>) -> Result<usize, QueryError> {

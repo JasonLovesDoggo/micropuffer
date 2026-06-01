@@ -84,7 +84,24 @@ test("stateful wasm engine owns query/write state in wasm memory", () => {
 
   replacement.replaceStore(json({ namespaces: [] }));
   expect(parseJsonObject(replacement.listNamespaces(json({})), "empty namespace list")).toStrictEqual({
-    namespaces: []
+    namespaces: [],
+    next_cursor: null
+  });
+
+  const firstPage = parseJsonObject(
+    engine.listNamespaces(json({ prefix: namespaceName, page_size: "1" })),
+    "string page size namespace list"
+  );
+  expect(firstPage.namespaces).toStrictEqual([{ id: namespaceName }]);
+  expect(firstPage.next_cursor).toBeTypeOf("string");
+
+  const invalidPageSize = parseJsonObject(
+    engine.listNamespacesResponse(json({ page_size: "bad" })),
+    "invalid page size namespace list"
+  );
+  expect(invalidPageSize).toStrictEqual({
+    status: 400,
+    body: "Failed to deserialize query string: invalid digit found in string"
   });
 });
 
