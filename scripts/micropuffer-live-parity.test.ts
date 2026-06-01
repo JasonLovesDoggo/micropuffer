@@ -77,9 +77,14 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
 
   const seedWrite: JsonObject = {
     distance_metric: "cosine_distance",
+    disable_backpressure: true,
     schema: {
       title: { type: "string", fuzzy: true },
       text: { type: "string", full_text_search: true },
+      tokens: {
+        type: "[]string",
+        full_text_search: { tokenizer: "pre_tokenized_array" }
+      },
       published_at: "datetime",
       tags: "[]string",
       sparse_vector: {
@@ -96,6 +101,7 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
         public: 1,
         title: "walrus den",
         text: "walrus narwhal arctic mammal",
+        tokens: ["walrus", "narwhal", "mammal"],
         score: 10,
         tags: ["arctic", "mammal"],
         published_at: "2026-05-30T00:00:00Z"
@@ -108,6 +114,7 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
         public: 0,
         title: "reef fish",
         text: "pufferfish clownfish swordfish",
+        tokens: ["pufferfish", "clownfish", "swordfish"],
         score: 7,
         tags: ["fish"],
         published_at: "2026-05-29T00:00:00Z"
@@ -120,6 +127,7 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
         public: 1,
         title: "quick walrus",
         text: "quick walrus sea mammal",
+        tokens: ["quick", "walrus", "mammal"],
         score: 5,
         tags: ["mammal", "sea"],
         published_at: "2026-05-31T00:00:00Z"
@@ -143,6 +151,16 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
   };
   expectJsonParity(await liveQuery(namespaceName, vectorQuery), miniQuery(namespaceName, vectorQuery));
 
+  const topKVectorQuery: JsonObject = {
+    rank_by: ["vector", "ANN", [1.0, 0.0]],
+    top_k: 2,
+    include_attributes: ["category"]
+  };
+  expectJsonParity(
+    await liveQuery(namespaceName, topKVectorQuery),
+    miniQuery(namespaceName, topKVectorQuery)
+  );
+
   const knnQuery: JsonObject = {
     rank_by: ["vector", "kNN", [1.0, 0.0]],
     limit: 2,
@@ -158,6 +176,35 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
     include_attributes: ["text"]
   };
   expectJsonParity(await liveQuery(namespaceName, bm25Query), miniQuery(namespaceName, bm25Query));
+
+  const bm25PrefixQuery: JsonObject = {
+    rank_by: ["text", "BM25", "wal", { last_as_prefix: true }],
+    limit: 10
+  };
+  expectJsonParity(
+    await liveQuery(namespaceName, bm25PrefixQuery),
+    miniQuery(namespaceName, bm25PrefixQuery)
+  );
+
+  const preTokenizedBm25Query: JsonObject = {
+    rank_by: ["tokens", "BM25", ["walrus"]],
+    limit: 10
+  };
+  expectJsonParity(
+    await liveQuery(namespaceName, preTokenizedBm25Query),
+    miniQuery(namespaceName, preTokenizedBm25Query)
+  );
+
+  const preTokenizedFilterQuery: JsonObject = {
+    rank_by: ["id", "asc"],
+    filters: ["tokens", "ContainsAllTokens", ["walrus", "mammal"]],
+    limit: 10,
+    include_attributes: ["tokens"]
+  };
+  expectJsonParity(
+    await liveQuery(namespaceName, preTokenizedFilterQuery),
+    miniQuery(namespaceName, preTokenizedFilterQuery)
+  );
 
   const sparseQuery: JsonObject = {
     rank_by: ["sparse_vector", "SparseKNN", { "0": 1.0, "2": 0.1 }],
@@ -867,6 +914,32 @@ async function assertErrorParity(): Promise<void> {
   );
   const miniBm25Array = miniQueryError(namespaceName, invalidBm25ArrayQuery);
   expectErrorParity(miniBm25Array, liveBm25Array);
+
+  const invalidTokenArrayQuery: JsonObject = {
+    rank_by: ["id", "asc"],
+    filters: ["text", "ContainsAllTokens", ["quick", "walrus"]],
+    limit: 10
+  };
+  const liveTokenArray = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(namespaceName)}/query`,
+    invalidTokenArrayQuery
+  );
+  const miniTokenArray = miniQueryError(namespaceName, invalidTokenArrayQuery);
+  expectErrorParity(miniTokenArray, liveTokenArray);
+
+  const invalidPreTokenizedStringQuery: JsonObject = {
+    rank_by: ["id", "asc"],
+    filters: ["tokens", "ContainsAllTokens", "walrus"],
+    limit: 10
+  };
+  const livePreTokenizedString = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(namespaceName)}/query`,
+    invalidPreTokenizedStringQuery
+  );
+  const miniPreTokenizedString = miniQueryError(namespaceName, invalidPreTokenizedStringQuery);
+  expectErrorParity(miniPreTokenizedString, livePreTokenizedString);
 
   const invalidExcludeAttributesQuery: JsonObject = {
     rank_by: ["id", "asc"],
