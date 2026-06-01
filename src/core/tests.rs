@@ -1,7 +1,7 @@
 use crate::core::{
     DistanceMetric, Document, Micropuffer, MiniStore, Namespace, PATCH_BY_FILTER_LIMIT,
-    ScalarEqKey, default_created_at, default_encryption, id_key, namespace_metadata,
-    parse_fts_config, query_namespace, query_store, tokenize, write_store,
+    ScalarEqKey, default_created_at, default_encryption, namespace_metadata, parse_fts_config,
+    query_namespace, query_store, tokenize, write_store,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Map, Number, Value, json};
@@ -709,6 +709,33 @@ fn aggregates_and_grouped_aggregates_apply_filters() {
 }
 
 #[test]
+fn scalar_grouped_count_preserves_sorted_group_order() {
+    let grouped = query_namespace(
+        &namespace(),
+        &json!({
+            "aggregate_by": {"count": ["Count"]},
+            "group_by": ["tenant_id"],
+            "top_k": 10
+        }),
+    )
+    .unwrap();
+    let groups = grouped
+        .get("aggregation_groups")
+        .and_then(Value::as_array)
+        .unwrap();
+    assert_eq!(
+        groups
+            .iter()
+            .map(|group| json!({"tenant_id": group["tenant_id"], "count": group["count"]}))
+            .collect::<Vec<_>>(),
+        vec![
+            json!({"tenant_id": "alpha", "count": 2}),
+            json!({"tenant_id": "beta", "count": 1})
+        ]
+    );
+}
+
+#[test]
 fn multi_query_preserves_result_order() {
     let response = query_namespace(
         &namespace(),
@@ -1324,7 +1351,7 @@ fn indexed_candidates_are_rechecked_by_filter_evaluator() {
         .postings
         .entry(ScalarEqKey::String("keep".to_string()))
         .or_default()
-        .insert(id_key(&json!(2)));
+        .insert(1);
 
     let poisoned = query_namespace(
         &namespace,
@@ -1456,7 +1483,7 @@ fn indexed_order_and_filters_track_by_filter_writes_and_edge_values() {
     assert!(rows(&remaining).is_empty());
     let namespace = store.namespace("edge-indexes").unwrap();
     assert_eq!(namespace.query_indexes.guard().equality.len(), 1);
-    assert_eq!(namespace.query_indexes.guard().order.len(), 1);
+    assert_eq!(namespace.query_indexes.guard().order.len(), 0);
 }
 
 #[test]
@@ -2422,16 +2449,43 @@ fn stateful_100k_dense_sparse_query_benchmark() {
         "limit": 10,
         "include_attributes": ["category"]
     });
+    let filter_order_query = json!({
+        "rank_by": ["score", "desc"],
+        "filters": ["category", "Eq", "category_7"],
+        "limit": 100,
+        "include_attributes": ["category", "score"]
+    });
+    let aggregate_count_query = json!({
+        "aggregate_by": {"count": ["Count"]},
+        "filters": ["category", "Eq", "category_7"]
+    });
+    let group_count_query = json!({
+        "aggregate_by": {"count": ["Count"]},
+        "group_by": ["category"],
+        "top_k": 10
+    });
     let dense_elapsed = benchmark_query_runs(&clone, "stateful-100k", &dense_query, runs);
     let sparse_elapsed = benchmark_query_runs(&clone, "stateful-100k", &sparse_query, runs);
+    let filter_order_elapsed =
+        benchmark_query_runs(&clone, "stateful-100k", &filter_order_query, runs);
+    let aggregate_count_elapsed =
+        benchmark_query_runs(&clone, "stateful-100k", &aggregate_count_query, runs);
+    let group_count_elapsed =
+        benchmark_query_runs(&clone, "stateful-100k", &group_count_query, runs);
 
     println!(
-        "stateful_100k_dense_sparse_query_benchmark rows={row_count} dimensions={dimensions} runs={runs} write_ms={:.2} dense_total_ms={:.2} dense_mean_ms={:.2} sparse_total_ms={:.2} sparse_mean_ms={:.2}",
+        "stateful_100k_dense_sparse_query_benchmark rows={row_count} dimensions={dimensions} runs={runs} write_ms={:.2} dense_total_ms={:.2} dense_mean_ms={:.2} sparse_total_ms={:.2} sparse_mean_ms={:.2} filter_order_total_ms={:.2} filter_order_mean_ms={:.2} aggregate_count_total_ms={:.2} aggregate_count_mean_ms={:.2} group_count_total_ms={:.2} group_count_mean_ms={:.2}",
         write_elapsed.as_secs_f64() * 1_000.0,
         dense_elapsed.as_secs_f64() * 1_000.0,
         dense_elapsed.as_secs_f64() * 1_000.0 / runs as f64,
         sparse_elapsed.as_secs_f64() * 1_000.0,
-        sparse_elapsed.as_secs_f64() * 1_000.0 / runs as f64
+        sparse_elapsed.as_secs_f64() * 1_000.0 / runs as f64,
+        filter_order_elapsed.as_secs_f64() * 1_000.0,
+        filter_order_elapsed.as_secs_f64() * 1_000.0 / runs as f64,
+        aggregate_count_elapsed.as_secs_f64() * 1_000.0,
+        aggregate_count_elapsed.as_secs_f64() * 1_000.0 / runs as f64,
+        group_count_elapsed.as_secs_f64() * 1_000.0,
+        group_count_elapsed.as_secs_f64() * 1_000.0 / runs as f64
     );
 }
 
