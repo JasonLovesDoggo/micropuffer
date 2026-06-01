@@ -63,6 +63,7 @@ Sources checked:
 - `POST /v1/namespaces/:namespace/_debug/recall`, exact basic response parity for deterministic small namespaces, including live's current omission of `ground_truth`
   - documented `rank_by` requests are supported locally; live currently returned `404` for the temp namespace, so live parity is skipped until the endpoint returns a stable success shape
 - `POST /v2/namespaces/:namespace/explain_query`, local shape only; live returned `400` for the temp namespace/index state
+  - micropuffer explains its own in-memory plan, including ranker, candidate source, filters, projection, limits, consistency, vector encoding, and multi-query subplans
 - `DELETE /v2/namespaces/:namespace`, exact success response parity and missing-namespace error parity
 - deprecated `GET /v1/namespaces/:namespace` columnar export
 - `GET /v1/namespaces`, including prefix, query-string `page_size` parsing, live-style `cursor` pagination, exhausted-page `next_cursor: null`, page-size error parity, and malformed-cursor error parity
@@ -106,16 +107,16 @@ Sources checked:
 - WASM `*Response` helpers for HTTP-style status/body mock envelopes
 - `Saturate`, `Decay`, and `Dist` rank operators
 - current documented filter-write partial limits: 50k rows for `patch_by_filter`, 5M rows for `delete_by_filter`
-- explain-query plan text
+- explain-query developer plan text for micropuffer's local in-memory execution model
 
 ## Known gaps
 
 - live branch parity: the current test key returns `403` for `branch_from_namespace`
-- full live `explain_query` parity: the live endpoint returned `400` (`index does not exist, cannot explain`) for the temp namespace
+- full live `explain_query` parity: the live endpoint returned `400` (`index does not exist, cannot explain`) for the temp namespace; micropuffer intentionally exposes a richer local-only plan until live output is observable
 - full live `recall.rank_by` parity: the docs describe `rank_by`, but the live endpoint returned `404` for a temp namespace where ordinary recall succeeded
 - live pinning enable parity: micropuffer has a pinning enable helper, but enabling pinning is not verified against live because it can have account and billing effects
 - exact billing and performance values
-- exact async/indexing behavior, including approximate metadata lag
+- exact async/indexing behavior, including approximate metadata lag, index `updating` states, cold query/cache rehydration, strong-read object-storage checks, and delayed explainability of newly written indexes
 - exact error text and status-code parity for all validation failures; selected query validation failures now expose live-style HTTP response envelopes, but not every write/schema failure has been audited
 - exact TPUF tokenizer parity for `word_v0` through `word_v3`; micropuffer models the documented differences, but does not embed TPUF's exact Unicode v10/v16/v17 segmenter tables
 - exact stemming implementation parity beyond the shared Snowball language families
