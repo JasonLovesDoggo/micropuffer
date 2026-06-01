@@ -1,13 +1,41 @@
 {
   "name": "micropuffer",
   "version": "0.1.0",
-  "private": true,
+  "description": "In-memory turbopuffer-compatible query engine for local tests and mocks.",
   "type": "module",
   "packageManager": "pnpm@11.3.0",
+  "main": "./pkg/micropuffer.js",
+  "types": "./pkg/micropuffer.d.ts",
+  "exports": {
+    ".": {
+      "types": "./pkg/micropuffer.d.ts",
+      "import": "./pkg/micropuffer.js"
+    }
+  },
+  "files": [
+    "pkg/",
+    "README.md"
+  ],
   "scripts": {
     "build:wasm": "just wasm",
+    "prepack": "just wasm",
+    "test": "just check",
     "test:fuzz": "just test-fuzz",
     "test:live": "just test-live"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/JasonLovesDoggo/micropuffer.git"
+  },
+  "keywords": [
+    "turbopuffer",
+    "vector-search",
+    "wasm",
+    "mock",
+    "testing"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "devDependencies": {
     "@types/node": "^25.9.1",

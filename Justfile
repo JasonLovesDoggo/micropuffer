@@ -15,7 +15,7 @@ clippy:
 test:
     cargo test
 
-typecheck:
+typecheck: wasm
     pnpm exec tsc --noEmit
 
 check: fmt clippy test typecheck
