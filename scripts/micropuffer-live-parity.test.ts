@@ -345,6 +345,7 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
   await assertDeprecatedExportParity();
   await assertListNamespaceParity();
   await assertMetadataParity();
+  await assertMetadataPatchParity();
   await assertSchemaParity();
   await assertSchemaUpdateParity();
   await assertWarmCacheParity();
@@ -574,6 +575,60 @@ async function assertMetadataParity(): Promise<void> {
   const miniSchema = requireObject(mini.schema, "micropuffer metadata schema");
   expect(mini.encryption).toStrictEqual(live.encryption);
   expectJsonParity(liveSchema, miniSchema);
+}
+
+async function assertMetadataPatchParity(): Promise<void> {
+  const metadataPath = `/v1/namespaces/${encodeURIComponent(namespaceName)}/metadata`;
+  const safeSuccessPatches: JsonObject[] = [
+    { pinning: null },
+    {},
+    { pinning: false }
+  ];
+  for (const patch of safeSuccessPatches) {
+    const live = await liveJson("PATCH", metadataPath, patch);
+    const mini = miniPatchMetadata(namespaceName, patch);
+    expectMetadataPatchStableFields(live, mini);
+  }
+
+  const invalidPinning = { pinning: "bad" };
+  expectErrorParity(
+    miniPatchMetadataError(namespaceName, invalidPinning),
+    await liveError("PATCH", metadataPath, invalidPinning)
+  );
+
+  const invalidReplicas = { pinning: { replicas: "bad" } };
+  expectErrorParity(
+    miniPatchMetadataError(namespaceName, invalidReplicas),
+    await liveError("PATCH", metadataPath, invalidReplicas)
+  );
+
+  const fractionalReplicas = { pinning: { replicas: 1.5 } };
+  expectErrorParity(
+    miniPatchMetadataError(namespaceName, fractionalReplicas),
+    await liveError("PATCH", metadataPath, fractionalReplicas)
+  );
+
+  const negativeReplicas = { pinning: { replicas: -1 } };
+  expectErrorParity(
+    miniPatchMetadataError(namespaceName, negativeReplicas),
+    await liveError("PATCH", metadataPath, negativeReplicas)
+  );
+
+  const zeroReplicas = { pinning: { replicas: 0 } };
+  expectErrorParity(
+    miniPatchMetadataError(namespaceName, zeroReplicas),
+    await liveError("PATCH", metadataPath, zeroReplicas)
+  );
+}
+
+function expectMetadataPatchStableFields(live: JsonObject, mini: JsonObject): void {
+  expectJsonParity(
+    requireObject(live.schema, "live metadata patch schema"),
+    requireObject(mini.schema, "micropuffer metadata patch schema")
+  );
+  expect(mini.encryption).toStrictEqual(live.encryption);
+  expect(mini.pinning).toBeUndefined();
+  expect(live.pinning).toBeUndefined();
 }
 
 async function assertSchemaParity(): Promise<void> {
@@ -1603,6 +1658,13 @@ function miniExportNamespace(namespace: string): JsonObject {
   );
 }
 
+function miniPatchMetadata(namespace: string, request: JsonObject): JsonObject {
+  return parseJsonObject(
+    micropuffer.patchMetadata(namespace, JSON.stringify(request)),
+    "micropuffer metadata patch response"
+  );
+}
+
 async function liveWrite(namespace: string, request: JsonObject): Promise<JsonObject> {
   return liveJson("POST", `/v2/namespaces/${encodeURIComponent(namespace)}`, request);
 }
@@ -1612,7 +1674,7 @@ async function liveQuery(namespace: string, request: JsonObject): Promise<JsonOb
 }
 
 async function liveError(
-  method: "DELETE" | "GET" | "POST",
+  method: "DELETE" | "GET" | "PATCH" | "POST",
   path: string,
   body?: JsonObject
 ): Promise<ErrorResult> {
@@ -1639,7 +1701,7 @@ async function liveError(
 }
 
 async function liveTextError(
-  method: "DELETE" | "GET" | "POST",
+  method: "DELETE" | "GET" | "PATCH" | "POST",
   path: string,
   body?: JsonObject
 ): Promise<TextErrorResult> {
@@ -1724,6 +1786,14 @@ function miniUpdateSchemaError(namespace: string, request: JsonObject): ErrorRes
   return errorResultFromEnvelope(response, "update schema");
 }
 
+function miniPatchMetadataError(namespace: string, request: JsonObject): ErrorResult {
+  const response = parseJsonObject(
+    micropuffer.patchMetadataResponse(namespace, JSON.stringify(request)),
+    "micropuffer metadata patch response envelope"
+  );
+  return errorResultFromEnvelope(response, "metadata patch");
+}
+
 function miniDeleteNamespaceError(namespace: string): ErrorResult {
   const response = parseJsonObject(
     micropuffer.deleteNamespaceResponse(namespace),
@@ -1766,7 +1836,7 @@ function errorWithoutLocation(error: JsonValue): string {
 }
 
 async function liveJson(
-  method: "DELETE" | "GET" | "POST",
+  method: "DELETE" | "GET" | "PATCH" | "POST",
   path: string,
   body?: JsonObject
 ): Promise<JsonObject> {
@@ -1791,7 +1861,7 @@ async function liveJson(
 }
 
 async function liveText(
-  method: "DELETE" | "GET" | "POST",
+  method: "DELETE" | "GET" | "PATCH" | "POST",
   path: string,
   body?: JsonObject
 ): Promise<{ status: number; body: string }> {

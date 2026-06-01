@@ -1594,11 +1594,14 @@ fn parse_pinning(value: &Value) -> Result<Option<Value>, QueryError> {
             }
         }))),
         Value::Object(object) => {
-            let replicas = object.get("replicas").and_then(Value::as_u64).unwrap_or(1);
+            let replicas = match object.get("replicas") {
+                Some(replicas) => replicas
+                    .as_u64()
+                    .ok_or_else(|| pinning_deserialize_error(value))?,
+                None => 1,
+            };
             if replicas == 0 {
-                return Err(QueryError::new(
-                    "pinning.replicas must be greater than zero.",
-                ));
+                return Err(QueryError::new("💔 replicas must be greater than 0"));
             }
             Ok(Some(json!({
                 "replicas": replicas,
@@ -1608,10 +1611,15 @@ fn parse_pinning(value: &Value) -> Result<Option<Value>, QueryError> {
                 }
             })))
         }
-        _ => Err(QueryError::new(
-            "pinning must be true, false, null, or an object.",
-        )),
+        _ => Err(pinning_deserialize_error(value)),
     }
+}
+
+fn pinning_deserialize_error(value: &Value) -> QueryError {
+    let column = json!({ "pinning": value }).to_string().len();
+    QueryError::unprocessable(format!(
+        "Failed to deserialize the JSON body into the target type: pinning: data did not match any variant of untagged enum UpdatePinningInput at line 1 column {column}"
+    ))
 }
 
 fn inferred_schema(namespace: &Namespace) -> Map<String, Value> {

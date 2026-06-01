@@ -63,6 +63,7 @@ Sources checked:
 - deprecated `GET /v1/namespaces/:namespace` columnar export
 - `GET /v1/namespaces`, including prefix, query-string `page_size` parsing, live-style `cursor` pagination, exhausted-page `next_cursor: null`, page-size error parity, and malformed-cursor error parity
 - `GET /v1/namespaces/:namespace/metadata`, exact schema and stable-field parity only
+- `PATCH /v1/namespaces/:namespace/metadata`, live parity for safe unpin/no-op cases and selected pinning validation errors
 - `GET /v1/namespaces/:namespace/schema`, exact response parity
 - `POST /v1/namespaces/:namespace/schema`, exact response parity for covered updates
   - unknown schema option keys are ignored when `type` is present
@@ -96,7 +97,7 @@ Sources checked:
 - schema options: `filterable`, `regex`, `glob`, `fuzzy`, `full_text_search`, `ann`, `sparse_knn`
 - vector base64 input and output
 - export helper filters and projections beyond the deprecated live endpoint
-- metadata pinning helper
+- metadata pinning enable helper
 - WASM `*Response` helpers for HTTP-style status/body mock envelopes
 - `Saturate`, `Decay`, and `Dist` rank operators
 - current documented filter-write partial limits: 50k rows for `patch_by_filter`, 5M rows for `delete_by_filter`
@@ -107,7 +108,7 @@ Sources checked:
 - live branch parity: the current test key returns `403` for `branch_from_namespace`
 - full live `explain_query` parity: the live endpoint returned `400` (`index does not exist, cannot explain`) for the temp namespace
 - full live `recall.rank_by` parity: the docs describe `rank_by`, but the live endpoint returned `404` for a temp namespace where ordinary recall succeeded
-- live pinning parity: micropuffer has a metadata helper, but this is not verified against live pinning because it can have account and billing effects
+- live pinning enable parity: micropuffer has a pinning enable helper, but enabling pinning is not verified against live because it can have account and billing effects
 - exact billing and performance values
 - exact async/indexing behavior, including approximate metadata lag
 - exact error text and status-code parity for all validation failures; selected query validation failures now expose live-style HTTP response envelopes, but not every write/schema failure has been audited
