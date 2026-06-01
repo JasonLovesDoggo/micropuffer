@@ -5,7 +5,6 @@ import {
   type JsonValue,
   HttpError,
   envOrDefault,
-  errorText,
   expectJsonParity,
   isJsonObject,
   loadEnv,
@@ -531,9 +530,7 @@ async function assertErrorParity(): Promise<void> {
     invalidQuery
   );
   const mini = miniQueryError(namespaceName, invalidQuery);
-  expect(mini.status).toBe(live.status);
-  expect(mini.body.status).toBe(live.body.status);
-  expect(mini.body.error).toBe(live.body.error);
+  expectErrorParity(mini, live);
 
   const invalidPerQuery: JsonObject = {
     rank_by: ["text", "BM25", "walrus"],
@@ -548,9 +545,7 @@ async function assertErrorParity(): Promise<void> {
     invalidPerQuery
   );
   const miniPer = miniQueryError(namespaceName, invalidPerQuery);
-  expect(miniPer.status).toBe(livePer.status);
-  expect(miniPer.body.status).toBe(livePer.body.status);
-  expect(miniPer.body.error).toBe(livePer.body.error);
+  expectErrorParity(miniPer, livePer);
 
   const invalidAggregateQuery: JsonObject = {
     aggregate_by: {
@@ -564,9 +559,7 @@ async function assertErrorParity(): Promise<void> {
     invalidAggregateQuery
   );
   const miniAggregate = miniQueryError(namespaceName, invalidAggregateQuery);
-  expect(miniAggregate.status).toBe(liveAggregate.status);
-  expect(miniAggregate.body.status).toBe(liveAggregate.body.status);
-  expect(miniAggregate.body.error).toBe(liveAggregate.body.error);
+  expectErrorParity(miniAggregate, liveAggregate);
 
   const invalidAggregateTopKQuery: JsonObject = {
     aggregate_by: {
@@ -580,9 +573,7 @@ async function assertErrorParity(): Promise<void> {
     invalidAggregateTopKQuery
   );
   const miniAggregateTopK = miniQueryError(namespaceName, invalidAggregateTopKQuery);
-  expect(miniAggregateTopK.status).toBe(liveAggregateTopK.status);
-  expect(miniAggregateTopK.body.status).toBe(liveAggregateTopK.body.status);
-  expect(miniAggregateTopK.body.error).toBe(liveAggregateTopK.body.error);
+  expectErrorParity(miniAggregateTopK, liveAggregateTopK);
 
   const invalidBm25ArrayQuery: JsonObject = {
     rank_by: ["text", "BM25", ["quick", "fish"]],
@@ -594,9 +585,33 @@ async function assertErrorParity(): Promise<void> {
     invalidBm25ArrayQuery
   );
   const miniBm25Array = miniQueryError(namespaceName, invalidBm25ArrayQuery);
-  expect(miniBm25Array.status).toBe(liveBm25Array.status);
-  expect(miniBm25Array.body.status).toBe(liveBm25Array.body.status);
-  expect(miniBm25Array.body.error).toBe(liveBm25Array.body.error);
+  expectErrorParity(miniBm25Array, liveBm25Array);
+
+  const invalidExcludeAttributesQuery: JsonObject = {
+    rank_by: ["id", "asc"],
+    limit: 1,
+    exclude_attributes: true
+  };
+  const liveExcludeAttributes = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(namespaceName)}/query`,
+    invalidExcludeAttributesQuery
+  );
+  const miniExcludeAttributes = miniQueryError(namespaceName, invalidExcludeAttributesQuery);
+  expectErrorParity(miniExcludeAttributes, liveExcludeAttributes);
+
+  const invalidVectorEncodingQuery: JsonObject = {
+    rank_by: ["id", "asc"],
+    limit: 1,
+    vector_encoding: "bad"
+  };
+  const liveVectorEncoding = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(namespaceName)}/query`,
+    invalidVectorEncodingQuery
+  );
+  const miniVectorEncoding = miniQueryError(namespaceName, invalidVectorEncodingQuery);
+  expectErrorParity(miniVectorEncoding, liveVectorEncoding);
 }
 
 async function assertBranchParityIfAllowed(lookup: JsonObject): Promise<void> {
@@ -670,18 +685,35 @@ async function liveError(
 }
 
 function miniQueryError(namespace: string, request: JsonObject): ErrorResult {
-  try {
-    miniQuery(namespace, request);
-  } catch (error) {
-    return {
-      status: 400,
-      body: {
-        status: "error",
-        error: errorText(error)
-      }
-    };
+  const response = parseJsonObject(
+    micropuffer.queryResponse(namespace, JSON.stringify(request)),
+    "micropuffer query response envelope"
+  );
+  const status = response.status;
+  const body = response.body;
+  if (typeof status !== "number") {
+    throw new Error("micropuffer query response status was not a number.");
   }
-  throw new Error("Expected micropuffer query to fail.");
+  if (!isJsonObject(body)) {
+    throw new Error("micropuffer query response body was not an object.");
+  }
+  if (status < 400) {
+    throw new Error("Expected micropuffer query to fail.");
+  }
+  return { status, body };
+}
+
+function expectErrorParity(mini: ErrorResult, live: ErrorResult): void {
+  expect(mini.status).toBe(live.status);
+  expect(mini.body.status).toBe(live.body.status);
+  expect(errorWithoutLocation(mini.body.error)).toBe(errorWithoutLocation(live.body.error));
+}
+
+function errorWithoutLocation(error: JsonValue): string {
+  if (typeof error !== "string") {
+    throw new Error("error body did not contain a string error.");
+  }
+  return error.replace(/ at line \d+ column \d+$/, "");
 }
 
 async function liveJson(

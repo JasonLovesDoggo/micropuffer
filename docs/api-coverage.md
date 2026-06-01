@@ -51,6 +51,7 @@ Sources checked:
 - `POST /v1/namespaces/:namespace/schema`, schema-shape parity only
 - `GET /v1/namespaces/:namespace/hint_cache_warm`, status parity only
 - exact status/body parity for include/exclude projection validation
+- exact status/body parity for selected Serde-style query validation failures
 
 ## Covered by local Rust tests only
 
@@ -75,7 +76,7 @@ Sources checked:
 - live pinning parity: micropuffer has a metadata helper, but this is not verified against live pinning because it can have account and billing effects
 - exact billing and performance values
 - exact async/indexing behavior, including approximate metadata lag
-- exact error text and status-code parity for all validation failures
+- exact error text and status-code parity for all validation failures; selected query validation failures now expose live-style HTTP response envelopes, but not every write/schema failure has been audited
 - exact TPUF tokenizer parity for `word_v0` through `word_v3`; micropuffer models the documented differences, but does not embed TPUF's exact Unicode v10/v16/v17 segmenter tables
 - exact stemming implementation parity beyond the shared Snowball language families
 
