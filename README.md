@@ -43,3 +43,26 @@ TURBOPUFFER_REGION=gcp-us-central1
 See `docs/api-coverage.md` for current coverage and known gaps.
 
 The pnpm workspace sets `minimumReleaseAge: 10080`, so dependency installs ignore package versions published in the last seven days.
+
+## Benchmark
+
+Run the live head-to-head benchmark with a temporary turbopuffer namespace:
+
+```sh
+MICROPUFFER_BENCH_ROWS=100000 pnpm bench:live
+```
+
+Useful knobs:
+
+```sh
+MICROPUFFER_BENCH_DIMS=32
+MICROPUFFER_BENCH_BATCH_SIZE=1000
+MICROPUFFER_BENCH_QUERY_RUNS=3
+MICROPUFFER_BENCH_KEEP_NAMESPACE=1
+```
+
+The benchmark covers row writes, ANN, BM25, sparse vector search, filtered order-by, count aggregation, and grouped count aggregation. It prints a Markdown table plus JSON summaries for copying into issues or release notes.
+
+## Contributing
+
+See `CONTRIBUTING.md`. The project uses Conventional Commits and the MIT license.

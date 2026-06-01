@@ -24,7 +24,7 @@ import {
   micropuffer_update_schema,
   micropuffer_warm_cache,
   micropuffer_write
-} from "../pkg/micropuffer.js";
+} from "micropuffer";
 
 
 const NAMESPACE_PREFIX = "micropuffer-live-parity";

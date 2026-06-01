@@ -281,7 +281,7 @@ fn read_store_or_default(store_path: &PathBuf) -> Result<MiniStore> {
     }
     match read_store(store_path) {
         Ok(store) => Ok(store),
-        Err(error) if !store_path.exists() => Ok(MiniStore::default()),
+        Err(_) if !store_path.exists() => Ok(MiniStore::default()),
         Err(error) => Err(error),
     }
 }

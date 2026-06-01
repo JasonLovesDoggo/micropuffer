@@ -1,0 +1,64 @@
+name: Bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      rows:
+        description: "Number of benchmark rows"
+        default: "100000"
+        required: true
+      dimensions:
+        description: "Vector dimensions"
+        default: "32"
+        required: true
+      query_runs:
+        description: "Measured runs per query operation"
+        default: "3"
+        required: true
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: extractions/setup-just@v2
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.3.0
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: cargo install wasm-bindgen-cli --version 0.2.122 --locked
+
+      - name: Run live benchmark
+        env:
+          TURBOPUFFER_API_KEY: ${{ secrets.TURBOPUFFER_API_KEY }}
+          TURBOPUFFER_REGION: gcp-us-central1
+          MICROPUFFER_BENCH_ROWS: ${{ inputs.rows }}
+          MICROPUFFER_BENCH_DIMS: ${{ inputs.dimensions }}
+          MICROPUFFER_BENCH_QUERY_RUNS: ${{ inputs.query_runs }}
+        run: |
+          if [ -z "$TURBOPUFFER_API_KEY" ]; then
+            echo "TURBOPUFFER_API_KEY is not configured; refusing to run live benchmark."
+            exit 1
+          fi
+          just bench-live | tee bench-results.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: bench-results.md

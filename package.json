@@ -2,6 +2,7 @@
   "name": "micropuffer",
   "version": "0.1.0",
   "description": "In-memory turbopuffer-compatible query engine for local tests and mocks.",
+  "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@11.3.0",
   "main": "./pkg/micropuffer.js",
@@ -14,11 +15,13 @@
   },
   "files": [
     "pkg/",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build:wasm": "just wasm",
     "prepack": "just wasm",
+    "bench:live": "just bench-live",
     "test": "just check",
     "test:fuzz": "just test-fuzz",
     "test:live": "just test-live"

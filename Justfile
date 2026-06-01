@@ -35,3 +35,6 @@ test-live: wasm
 
 test-fuzz: wasm
     pnpm exec vitest run scripts/micropuffer-live-fuzz.test.ts
+
+bench-live: wasm
+    node --experimental-strip-types scripts/micropuffer-live-bench.ts

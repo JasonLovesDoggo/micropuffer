@@ -15,7 +15,7 @@ import {
 import {
   micropuffer_query,
   micropuffer_write
-} from "../pkg/micropuffer.js";
+} from "micropuffer";
 
 const namespaceName = `micropuffer-live-fuzz-${Date.now()}-${process.pid}`;
 const seed = 0x5eed_2026;
