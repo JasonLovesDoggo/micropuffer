@@ -60,7 +60,7 @@ fn grouped_aggregation_over_tags_is_stable() {
         &json!({
             "aggregate_by": {"count": ["Count"]},
             "group_by": [{"tag": ["ForEachUnique", "tags"]}],
-            "limit": {"total": 10}
+            "top_k": 10
         }),
     )
     .unwrap();
@@ -85,7 +85,7 @@ fn grouped_aggregation_over_tags_is_stable() {
         &json!({
             "aggregate_by": {"score_sum": ["Sum", "score"]},
             "group_by": [{"tag": ["ForEachUnique", "tags"]}],
-            "limit": {"total": 10}
+            "top_k": 10
         }),
     )
     .unwrap();

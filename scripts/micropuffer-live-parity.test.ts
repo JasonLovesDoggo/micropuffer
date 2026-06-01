@@ -178,6 +178,15 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
   };
   expectJsonParity(await liveQuery(namespaceName, aggregateQuery), miniQuery(namespaceName, aggregateQuery));
 
+  const aggregateDefaultLimitQuery: JsonObject = {
+    aggregate_by: { count: ["Count"] },
+    group_by: ["category"]
+  };
+  expectJsonParity(
+    await liveQuery(namespaceName, aggregateDefaultLimitQuery),
+    miniQuery(namespaceName, aggregateDefaultLimitQuery)
+  );
+
   const sumAggregateQuery: JsonObject = {
     aggregate_by: { score_sum: ["Sum", "score"] }
   };
@@ -529,6 +538,22 @@ async function assertErrorParity(): Promise<void> {
   expect(miniAggregate.status).toBe(liveAggregate.status);
   expect(miniAggregate.body.status).toBe(liveAggregate.body.status);
   expect(miniAggregate.body.error).toBe(liveAggregate.body.error);
+
+  const invalidAggregateTopKQuery: JsonObject = {
+    aggregate_by: {
+      count: ["Count"]
+    },
+    top_k: 10
+  };
+  const liveAggregateTopK = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(namespaceName)}/query`,
+    invalidAggregateTopKQuery
+  );
+  const miniAggregateTopK = miniQueryError(namespaceName, invalidAggregateTopKQuery);
+  expect(miniAggregateTopK.status).toBe(liveAggregateTopK.status);
+  expect(miniAggregateTopK.body.status).toBe(liveAggregateTopK.body.status);
+  expect(miniAggregateTopK.body.error).toBe(liveAggregateTopK.body.error);
 }
 
 async function assertBranchParityIfAllowed(lookup: JsonObject): Promise<void> {
