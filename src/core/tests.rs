@@ -642,8 +642,8 @@ fn fts_schema_options_affect_bm25_and_token_filters() {
         .write(
             "fts-options",
             &json!({
-                "schema": {
-                    "body": {
+            "schema": {
+                "body": {
                         "type": "string",
                         "full_text_search": {
                             "ascii_folding": true,
@@ -658,12 +658,13 @@ fn fts_schema_options_affect_bm25_and_token_filters() {
                         "type": "string",
                         "full_text_search": {
                             "case_sensitive": true
-                        }
                     }
-                },
-                "upsert_rows": [
-                    {"id": 1, "vector": [0.0, 0.0], "body": "The café runner runs quickly", "exact_body": "Case Token"},
-                    {"id": 2, "vector": [1.0, 1.0], "body": "fish reef", "exact_body": "case token"}
+                }
+            },
+            "distance_metric": "cosine_distance",
+            "upsert_rows": [
+                {"id": 1, "vector": [0.0, 0.0], "body": "The café runner runs quickly", "exact_body": "Case Token"},
+                {"id": 2, "vector": [1.0, 1.0], "body": "fish reef", "exact_body": "case token"}
                 ]
             }),
         )
@@ -1035,6 +1036,7 @@ fn vector_attributes_remain_visible_to_write_conditions() {
         .write(
             "vector-conditions",
             &json!({
+                "distance_metric": "cosine_distance",
                 "upsert_rows": [
                     {"id": 1, "vector": [1.0, 0.0], "title": "original"},
                     {"id": 2, "vector": [2.0, 0.0], "title": "delete-me"}
@@ -1103,6 +1105,7 @@ fn vector_projection_export_and_roundtrip_keep_base64_and_typed_cache() {
         .write(
             "vector-projection",
             &json!({
+                "distance_metric": "cosine_distance",
                 "upsert_rows": [
                     {"id": 1, "vector": [1.0, 0.0], "title": "one"},
                     {"id": 2, "vector": [0.0, 1.0], "title": "two"}
@@ -1245,6 +1248,7 @@ fn typed_dense_vectors_refresh_on_upsert_and_imported_stores() {
         .write(
             "typed-refresh",
             &json!({
+                "distance_metric": "cosine_distance",
                 "schema": {
                     "vector": "[2]f32",
                     "sparse_vector": {
@@ -1305,6 +1309,7 @@ fn writes_upsert_patch_delete_and_query_in_memory() {
         &mut store,
         "local-test",
         &json!({
+            "distance_metric": "cosine_distance",
             "upsert_rows": [
                 {"id": 1, "vector": [0.0, 0.0], "title": "first", "score": 10, "tenant_id": "a"},
                 {"id": 2, "vector": [1.0, 1.0], "title": "second", "score": 2, "tenant_id": "b"}
@@ -1828,6 +1833,7 @@ fn writes_enforce_schema_types_and_vector_invariants() {
         .write(
             "schema-demo",
             &json!({
+                "distance_metric": "cosine_distance",
                 "schema": {
                     "vector": "[2]f32",
                     "title": "string",
@@ -2182,6 +2188,7 @@ fn schema_rejects_type_changes_and_too_many_vector_columns() {
         .write(
             "too-many-vectors",
             &json!({
+                "distance_metric": "cosine_distance",
                 "schema": {
                     "vector": "[2]f32",
                     "image_vector": "[2]f32",
@@ -2441,12 +2448,87 @@ fn missing_namespace_errors_match_live_status_and_text() {
 }
 
 #[test]
+fn vector_writes_require_live_distance_metric_rules() {
+    let mut clone = Micropuffer::new();
+
+    let missing_metric = clone
+        .write(
+            "metric-required",
+            &json!({"upsert_rows": [{"id": 1, "vector": [1.0, 0.0]}]}),
+        )
+        .unwrap_err();
+    assert_eq!(missing_metric.status_code(), 400);
+    assert_eq!(
+        missing_metric.to_string(),
+        "💔 distance_metric must be specified for write to namespace with a vector"
+    );
+
+    let invalid_metric = clone
+        .write(
+            "metric-invalid",
+            &json!({
+                "distance_metric": "bad",
+                "upsert_rows": [{"id": 1, "vector": [1.0, 0.0]}]
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(invalid_metric.status_code(), 422);
+    assert_eq!(
+        invalid_metric.to_string(),
+        "Failed to deserialize the JSON body into the target type: distance_metric: unknown variant `bad`, expected one of `Unknown`, `euclidean_squared`, `cosine_distance`, `euclidean`, `Query`"
+    );
+
+    clone
+        .write(
+            "metric-mismatch",
+            &json!({
+                "distance_metric": "cosine_distance",
+                "upsert_rows": [{"id": 1, "vector": [1.0, 0.0]}]
+            }),
+        )
+        .unwrap();
+    let mismatch = clone
+        .write(
+            "metric-mismatch",
+            &json!({
+                "distance_metric": "euclidean_squared",
+                "upsert_rows": [{"id": 2, "vector": [0.0, 1.0]}]
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(mismatch.status_code(), 400);
+    assert_eq!(
+        mismatch.to_string(),
+        "💔 distance metric mismatch, expected cosine_distance, got euclidean_squared"
+    );
+
+    clone
+        .write(
+            "scalar-then-vector",
+            &json!({"upsert_rows": [{"id": 1, "title": "scalar"}]}),
+        )
+        .unwrap();
+    let added_vector = clone
+        .write(
+            "scalar-then-vector",
+            &json!({"upsert_rows": [{"id": 2, "vector": [1.0, 0.0]}]}),
+        )
+        .unwrap_err();
+    assert_eq!(added_vector.status_code(), 400);
+    assert_eq!(
+        added_vector.to_string(),
+        "💔 Vector provided for namespace without vector attribute"
+    );
+}
+
+#[test]
 fn schema_update_and_warm_cache_match_workspace_shapes() {
     let mut clone = Micropuffer::new();
     clone
         .write(
             "schema-api",
             &json!({
+                "distance_metric": "cosine_distance",
                 "upsert_rows": [
                     {"id": 1, "vector": [0.0, 0.0], "title": "hello"}
                 ]

@@ -22,6 +22,9 @@ Sources checked:
   - conditional upserts, patches, and deletes
   - `return_affected_ids`
   - `copy_from_namespace`
+  - `distance_metric` required for first vector writes
+  - distance metric mismatch rejection
+  - scalar namespace rejection when adding a vector later
 - `POST /v2/namespaces/:namespace/query`
   - `ANN`
   - `kNN`
@@ -53,6 +56,7 @@ Sources checked:
 - exact status/body parity for include/exclude projection validation
 - exact status/body parity for selected Serde-style query validation failures
 - exact status/body parity for missing-namespace query failures
+- exact status/body parity for selected write validation failures
 
 ## Covered by local Rust tests only
 
