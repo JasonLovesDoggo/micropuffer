@@ -1,7 +1,7 @@
 use crate::core::{
     DistanceMetric, Document, Micropuffer, MiniStore, Namespace, PATCH_BY_FILTER_LIMIT,
-    default_created_at, default_encryption, parse_fts_config, query_namespace, query_store,
-    tokenize, write_store,
+    default_created_at, default_encryption, namespace_metadata, parse_fts_config, query_namespace,
+    query_store, tokenize, write_store,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Map, Number, Value, json};
@@ -749,6 +749,132 @@ fn write_responses_include_requested_zero_counts_and_query_billing() {
 }
 
 #[test]
+fn repeated_query_and_metadata_reuse_cached_logical_bytes() {
+    let namespace = namespace();
+
+    assert_eq!(namespace.logical_bytes_recompute_count(), 0);
+    assert!(!namespace.has_cached_logical_bytes());
+
+    let first_query =
+        query_namespace(&namespace, &json!({"rank_by": ["id", "asc"], "limit": 1})).unwrap();
+    let first_bytes = first_query["billing"]["billable_logical_bytes_queried"]
+        .as_u64()
+        .unwrap();
+    assert!(first_bytes > 0);
+    assert_eq!(namespace.logical_bytes_recompute_count(), 1);
+    assert!(namespace.has_cached_logical_bytes());
+
+    let metadata = namespace_metadata(&namespace).unwrap();
+    assert_eq!(metadata["approx_logical_bytes"], first_bytes);
+
+    let second_query =
+        query_namespace(&namespace, &json!({"rank_by": ["id", "asc"], "limit": 1})).unwrap();
+    assert_eq!(
+        second_query["billing"]["billable_logical_bytes_queried"],
+        first_query["billing"]["billable_logical_bytes_queried"]
+    );
+    assert_eq!(namespace.logical_bytes_recompute_count(), 1);
+}
+
+#[test]
+fn logical_bytes_cache_is_not_serialized_with_namespace() {
+    let namespace = namespace();
+    namespace_metadata(&namespace).unwrap();
+
+    let serialized = serde_json::to_value(&namespace).unwrap();
+
+    assert!(serialized.get("logical_bytes_cache").is_none());
+    assert!(serialized.get("documents").is_some());
+}
+
+#[test]
+fn write_invalidates_cached_logical_bytes_and_next_metadata_recomputes() {
+    let mut store = MiniStore::default();
+    write_store(
+        &mut store,
+        "metrics-cache",
+        &json!({"upsert_rows": [{"id": 1, "title": "first"}]}),
+    )
+    .unwrap();
+
+    let first_query = query_store(
+        &store,
+        "metrics-cache",
+        &json!({"rank_by": ["id", "asc"], "limit": 1}),
+    )
+    .unwrap();
+    let first_bytes = first_query["billing"]["billable_logical_bytes_queried"]
+        .as_u64()
+        .unwrap();
+    let namespace = store.namespace("metrics-cache").unwrap();
+    assert_eq!(namespace.logical_bytes_recompute_count(), 1);
+    assert!(namespace.has_cached_logical_bytes());
+
+    write_store(
+        &mut store,
+        "metrics-cache",
+        &json!({
+            "patch_rows": [
+                {"id": 1, "payload": "the cached byte count should not survive this write"}
+            ]
+        }),
+    )
+    .unwrap();
+    let namespace = store.namespace("metrics-cache").unwrap();
+    assert_eq!(namespace.logical_bytes_recompute_count(), 1);
+    assert!(!namespace.has_cached_logical_bytes());
+
+    let metadata = namespace_metadata(namespace).unwrap();
+    let recomputed_bytes = metadata["approx_logical_bytes"].as_u64().unwrap();
+    assert!(recomputed_bytes > first_bytes);
+    let namespace = store.namespace("metrics-cache").unwrap();
+    assert_eq!(namespace.logical_bytes_recompute_count(), 2);
+    assert!(namespace.has_cached_logical_bytes());
+}
+
+#[test]
+fn copy_replaces_existing_empty_namespace_logical_bytes_cache() {
+    let mut store = MiniStore::default();
+    write_store(
+        &mut store,
+        "source",
+        &json!({"upsert_rows": [{"id": 1, "title": "copied"}]}),
+    )
+    .unwrap();
+    write_store(
+        &mut store,
+        "destination",
+        &json!({"schema": {"title": "string"}}),
+    )
+    .unwrap();
+
+    let empty_metadata = namespace_metadata(store.namespace("destination").unwrap()).unwrap();
+    assert_eq!(empty_metadata["approx_logical_bytes"], 0);
+    assert!(
+        store
+            .namespace("destination")
+            .unwrap()
+            .has_cached_logical_bytes()
+    );
+
+    write_store(
+        &mut store,
+        "destination",
+        &json!({"copy_from_namespace": "source"}),
+    )
+    .unwrap();
+
+    let destination_metadata = namespace_metadata(store.namespace("destination").unwrap()).unwrap();
+    assert_eq!(destination_metadata["approx_row_count"], 1);
+    assert!(
+        destination_metadata["approx_logical_bytes"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+}
+
+#[test]
 fn patch_by_filter_respects_partial_limit_and_rows_remaining() {
     let mut documents = Vec::with_capacity(PATCH_BY_FILTER_LIMIT + 1);
     for index in 0..=PATCH_BY_FILTER_LIMIT {
@@ -775,6 +901,7 @@ fn patch_by_filter_respects_partial_limit_and_rows_remaining() {
             pinning: None,
             branching_parent: None,
             documents,
+            logical_bytes_cache: Default::default(),
         }],
     });
     let too_many = clone
