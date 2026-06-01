@@ -492,6 +492,68 @@ fn sparse_knn_uses_dot_product_descending_and_excludes_zero_scores() {
 }
 
 #[test]
+fn sparse_knn_index_updates_after_writes() {
+    let mut clone = Micropuffer::new();
+    clone
+        .write(
+            "sparse-index",
+            &json!({
+                "upsert_rows": [
+                    {"id": 1, "sparse_vector": {"a": 1.0}},
+                    {"id": 2, "sparse_vector": {"a": 0.5}},
+                    {"id": 3, "sparse_vector": {"b": 1.0}}
+                ]
+            }),
+        )
+        .unwrap();
+
+    let first = clone
+        .query(
+            "sparse-index",
+            &json!({
+                "rank_by": ["sparse_vector", "SparseKNN", {"a": 1.0}],
+                "limit": 10
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        rows(&first)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(1), json!(2)]
+    );
+
+    clone
+        .write(
+            "sparse-index",
+            &json!({
+                "upsert_rows": [
+                    {"id": 1, "sparse_vector": {"b": 1.0}},
+                    {"id": 4, "sparse_vector": {"a": 2.0}}
+                ]
+            }),
+        )
+        .unwrap();
+    let updated = clone
+        .query(
+            "sparse-index",
+            &json!({
+                "rank_by": ["sparse_vector", "SparseKNN", {"a": 1.0}],
+                "limit": 10
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        rows(&updated)
+            .iter()
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(4), json!(2)]
+    );
+}
+
+#[test]
 fn order_by_multiple_attributes_uses_stable_tie_breaks() {
     let response = query_namespace(
         &namespace(),
