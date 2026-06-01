@@ -931,6 +931,20 @@ async function assertErrorParity(): Promise<void> {
   const miniMalformedDeletes = miniWriteError(metricNamespace, malformedDeletesWrite);
   expectErrorParity(miniMalformedDeletes, liveMalformedDeletes);
 
+  const malformedIdWrites: JsonObject[] = [
+    { upsert_rows: [{ id: false }] },
+    { patch_rows: [{ id: 1.5 }] },
+    { upsert_columns: { id: [true], title: ["bad"] } },
+    { patch_columns: { id: [1.5], title: ["bad"] } },
+    { deletes: [true] }
+  ];
+  for (const malformedIdWrite of malformedIdWrites) {
+    expectErrorParity(
+      miniWriteError(metricNamespace, malformedIdWrite),
+      await liveError("POST", `/v2/namespaces/${encodeURIComponent(metricNamespace)}`, malformedIdWrite)
+    );
+  }
+
   const copyConflictWrite: JsonObject = {
     copy_from_namespace: namespaceName,
     upsert_rows: [{ id: 1 }]
