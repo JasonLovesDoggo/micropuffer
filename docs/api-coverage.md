@@ -44,6 +44,7 @@ Sources checked:
   - multi-query
 - `POST /v1/namespaces/:namespace/_debug/recall`, response-shape parity only
 - `POST /v2/namespaces/:namespace/explain_query`, local shape only; live returned `400` for the temp namespace/index state
+- deprecated `GET /v1/namespaces/:namespace` columnar export
 - `GET /v1/namespaces`
 - `GET /v1/namespaces/:namespace/metadata`, schema-shape parity only
 - `GET /v1/namespaces/:namespace/schema`, schema-shape parity only
@@ -60,7 +61,7 @@ Sources checked:
 - non-English stopword removal using the supported TPUF language list
 - schema options: `filterable`, `regex`, `glob`, `fuzzy`, `full_text_search`, `ann`, `sparse_knn`
 - vector base64 input and output
-- `export_namespace` helper
+- export helper filters and projections beyond the deprecated live endpoint
 - metadata pinning helper
 - namespace delete helper
 - `Saturate`, `Decay`, and `Dist` rank operators
@@ -69,7 +70,6 @@ Sources checked:
 
 ## Known gaps
 
-- deprecated `GET /v1/namespaces/:namespace` columnar export
 - live branch parity: the current test key returns `403` for `branch_from_namespace`
 - full live `explain_query` parity: the live endpoint returned `400` (`index does not exist, cannot explain`) for the temp namespace
 - live pinning parity: micropuffer has a metadata helper, but this is not verified against live pinning because it can have account and billing effects

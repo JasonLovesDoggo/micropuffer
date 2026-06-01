@@ -1163,10 +1163,11 @@ fn vector_projection_export_and_roundtrip_keep_base64_and_typed_cache() {
             }),
         )
         .unwrap();
-    assert_eq!(
-        rows(&export),
-        &[json!({"id": 1, "vector": expected_vector})]
-    );
+    assert_eq!(export["ids"], json!([1]));
+    assert_eq!(export["vectors"], json!([expected_vector]));
+    assert_eq!(export["attributes"], json!({}));
+    assert_eq!(export["next_cursor"], Value::Null);
+    assert_eq!(export["message"], Value::Null);
 
     let serialized = serde_json::to_value(clone.store()).unwrap();
     let imported: MiniStore = serde_json::from_value(serialized).unwrap();
@@ -2323,9 +2324,48 @@ fn metadata_patch_and_export_match_documented_workspace_shape() {
             }),
         )
         .unwrap();
-    assert_eq!(rows(&export).len(), 1);
-    assert_eq!(rows(&export)[0]["id"], 2);
-    assert!(rows(&export)[0].get("$dist").is_none());
+    assert_eq!(export["ids"], json!([2]));
+    assert_eq!(export["vectors"], json!([Value::Null]));
+    assert_eq!(
+        export["attributes"],
+        json!({
+            "score": [3],
+            "title": ["beta"]
+        })
+    );
+}
+
+#[test]
+fn export_namespace_uses_live_columnar_shape_with_missing_attribute_nulls() {
+    let mut clone = Micropuffer::new();
+    clone
+        .write(
+            "columnar-export",
+            &json!({
+                "distance_metric": "cosine_distance",
+                "upsert_rows": [
+                    {"id": 1, "vector": [1.0, 0.0], "title": "alpha", "score": 10},
+                    {"id": 2, "vector": [0.0, 1.0], "title": "beta"}
+                ]
+            }),
+        )
+        .unwrap();
+
+    let export = clone
+        .export_namespace("columnar-export", &json!({}))
+        .unwrap();
+
+    assert_eq!(export["ids"], json!([1, 2]));
+    assert_eq!(export["vectors"], json!([[1.0, 0.0], [0.0, 1.0]]));
+    assert_eq!(
+        export["attributes"],
+        json!({
+            "score": [10, null],
+            "title": ["alpha", "beta"]
+        })
+    );
+    assert_eq!(export["next_cursor"], Value::Null);
+    assert_eq!(export["message"], Value::Null);
 }
 
 #[test]
