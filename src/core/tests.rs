@@ -2628,6 +2628,38 @@ fn schema_update_and_warm_cache_match_workspace_shapes() {
             .is_none()
     );
 
+    let missing_type = clone
+        .update_schema(
+            "schema-api",
+            &json!({
+                "title": {
+                    "regex": true
+                }
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(missing_type.status_code(), 422);
+    assert_eq!(
+        missing_type.to_string(),
+        "Failed to deserialize the JSON body into the target type: title: data did not match any variant of untagged enum AttributeSchemaInput"
+    );
+
+    let wrapped_schema = clone
+        .update_schema(
+            "schema-api",
+            &json!({
+                "schema": {
+                    "title": "string"
+                }
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(wrapped_schema.status_code(), 422);
+    assert_eq!(
+        wrapped_schema.to_string(),
+        "Failed to deserialize the JSON body into the target type: schema: data did not match any variant of untagged enum AttributeSchemaInput"
+    );
+
     let warmed = clone.warm_cache("schema-api").unwrap();
     assert_eq!(warmed["status"], "ACCEPTED");
 }

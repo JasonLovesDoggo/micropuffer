@@ -1549,7 +1549,7 @@ fn infer_id_schema_type(namespace: &Namespace) -> Value {
 fn merge_schema(namespace: &mut Namespace, schema: &Map<String, Value>) -> Result<(), QueryError> {
     for (attribute, definition) in schema {
         validate_attribute_name(attribute)?;
-        let incoming_type = schema_type_name(definition)?;
+        let incoming_type = incoming_schema_type_name(attribute, definition)?;
         validate_schema_definition(attribute, definition, incoming_type)?;
         if namespace.schema.contains_key(attribute) {
             let current_type = schema_type_name(
@@ -1829,6 +1829,28 @@ fn schema_type_name(definition: &Value) -> Result<&str, QueryError> {
         .ok_or_else(|| {
             QueryError::new("schema definitions must be strings or objects with a type.")
         })
+}
+
+fn incoming_schema_type_name<'a>(
+    attribute: &str,
+    definition: &'a Value,
+) -> Result<&'a str, QueryError> {
+    if let Some(name) = definition.as_str() {
+        return Ok(name);
+    }
+    let Some(object) = definition.as_object() else {
+        return Err(schema_deserialize_error(attribute));
+    };
+    object
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| schema_deserialize_error(attribute))
+}
+
+fn schema_deserialize_error(attribute: &str) -> QueryError {
+    QueryError::unprocessable(format!(
+        "Failed to deserialize the JSON body into the target type: {attribute}: data did not match any variant of untagged enum AttributeSchemaInput"
+    ))
 }
 
 fn normalize_metadata_schema_definition(

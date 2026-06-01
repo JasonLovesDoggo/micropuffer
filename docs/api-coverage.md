@@ -53,6 +53,7 @@ Sources checked:
 - `GET /v1/namespaces/:namespace/schema`, schema-shape parity only
 - `POST /v1/namespaces/:namespace/schema`, schema-shape parity only
   - unknown schema option keys are ignored when `type` is present
+  - object definitions without `type` return live-style `422` deserialize errors
 - `GET /v1/namespaces/:namespace/hint_cache_warm`, status parity only
 - exact status/body parity for include/exclude projection validation
 - exact status/body parity for selected Serde-style query validation failures
@@ -63,6 +64,7 @@ Sources checked:
   - malformed `deletes`
   - `copy_from_namespace` mixed with ordinary write fields
 - exact status/body parity for schema type-change validation, including the `attribute` body field
+- exact status/body parity for selected malformed schema update failures
 
 ## Covered by local Rust tests only
 
