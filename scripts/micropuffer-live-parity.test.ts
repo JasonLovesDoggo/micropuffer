@@ -635,8 +635,9 @@ async function assertWarmCacheParity(): Promise<void> {
 async function assertRecallParity(): Promise<void> {
   const request: JsonObject = {
     num: 1,
-    top_k: 1,
-    filters: ["public", "Eq", 1]
+    top_k: 10,
+    filters: ["public", "Eq", 1],
+    include_ground_truth: true
   };
   const live = await liveJson(
     "POST",
