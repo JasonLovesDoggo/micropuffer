@@ -1167,9 +1167,18 @@ pub fn write_store(
         .get("distance_metric")
         .map(DistanceMetric::parse)
         .transpose()?;
-    let mut upserts =
-        collect_write_rows(request.get("upsert_rows"), request.get("upsert_columns"))?;
-    let mut patches = collect_write_rows(request.get("patch_rows"), request.get("patch_columns"))?;
+    let mut upserts = collect_write_rows(
+        "upsert_rows",
+        request.get("upsert_rows"),
+        "upsert_columns",
+        request.get("upsert_columns"),
+    )?;
+    let mut patches = collect_write_rows(
+        "patch_rows",
+        request.get("patch_rows"),
+        "patch_columns",
+        request.get("patch_columns"),
+    )?;
     let deletes = collect_delete_ids(request.get("deletes"))?;
     reject_duplicate_write_ids(&upserts, &patches, &deletes)?;
     validate_distance_metric_for_write(
@@ -2570,7 +2579,7 @@ fn reject_unexpected_write_fields(
     for key in request.keys() {
         if !allowed.contains(key.as_str()) {
             return Err(QueryError::new(format!(
-                "{operation} cannot be combined with '{key}'."
+                "💔 {operation} cannot be used with other write request fields"
             )));
         }
     }
@@ -2640,26 +2649,52 @@ fn write_row_has_vector(row: &WriteRow) -> bool {
 }
 
 fn collect_write_rows(
+    rows_field: &str,
     rows_value: Option<&Value>,
+    columns_field: &str,
     columns_value: Option<&Value>,
 ) -> Result<Vec<WriteRow>, QueryError> {
     let mut rows = Vec::new();
     if let Some(rows_value) = rows_value {
-        for row in as_array(rows_value, "write rows")? {
-            rows.push(write_row_from_object(as_object(row, "write row")?)?);
+        let row_values = rows_value.as_array().ok_or_else(|| {
+            QueryError::unprocessable(format!(
+                "Failed to deserialize the JSON body into the target type: {rows_field}: invalid type: {}, expected a sequence",
+                serde_type_name(rows_value)
+            ))
+        })?;
+        for (index, row) in row_values.iter().enumerate() {
+            rows.push(write_row_from_value(rows_field, index, row)?);
         }
     }
     if let Some(columns_value) = columns_value {
-        rows.extend(write_rows_from_columns(columns_value)?);
+        rows.extend(write_rows_from_columns(columns_field, columns_value)?);
     }
     Ok(rows)
 }
 
-fn write_row_from_object(object: &Map<String, Value>) -> Result<WriteRow, QueryError> {
+fn write_row_from_value(field: &str, index: usize, value: &Value) -> Result<WriteRow, QueryError> {
+    let object = value.as_object().ok_or_else(|| {
+        QueryError::unprocessable(format!(
+            "Failed to deserialize the JSON body into the target type: {field}[{index}]: invalid type: {}, expected a map",
+            serde_type_name(value)
+        ))
+    })?;
+    write_row_from_object(field, index, object)
+}
+
+fn write_row_from_object(
+    field: &str,
+    index: usize,
+    object: &Map<String, Value>,
+) -> Result<WriteRow, QueryError> {
     let id = object
         .get("id")
         .cloned()
-        .ok_or_else(|| QueryError::new("write row id is required."))?;
+        .ok_or_else(|| {
+            QueryError::unprocessable(format!(
+                "Failed to deserialize the JSON body into the target type: {field}[{index}]: missing field `id`"
+            ))
+        })?;
     validate_document_id(&id)?;
     let attributes = object
         .iter()
@@ -2669,8 +2704,16 @@ fn write_row_from_object(object: &Map<String, Value>) -> Result<WriteRow, QueryE
     Ok(WriteRow { id, attributes })
 }
 
-fn write_rows_from_columns(columns_value: &Value) -> Result<Vec<WriteRow>, QueryError> {
-    let columns = as_object(columns_value, "write columns")?;
+fn write_rows_from_columns(
+    field: &str,
+    columns_value: &Value,
+) -> Result<Vec<WriteRow>, QueryError> {
+    let columns = columns_value.as_object().ok_or_else(|| {
+        QueryError::unprocessable(format!(
+            "Failed to deserialize the JSON body into the target type: {field}: invalid type: {}, expected a map",
+            serde_type_name(columns_value)
+        ))
+    })?;
     let ids = as_array(
         columns
             .get("id")
@@ -2717,7 +2760,12 @@ fn collect_delete_ids(deletes: Option<&Value>) -> Result<Vec<Value>, QueryError>
     let Some(deletes) = deletes else {
         return Ok(Vec::new());
     };
-    as_array(deletes, "deletes")?
+    let deletes = deletes.as_array().ok_or_else(|| {
+        QueryError::unprocessable(
+            "Failed to deserialize the JSON body into the target type: deletes: data did not match any variant of untagged enum IdVec",
+        )
+    })?;
+    deletes
         .iter()
         .map(|id| validate_document_id(id).map(|()| id.clone()))
         .collect()
