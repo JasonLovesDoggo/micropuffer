@@ -3238,6 +3238,12 @@ fn prepare_bm25_query(
     namespace: &Namespace,
 ) -> Result<PreparedBm25Query, QueryError> {
     let config = fts_config_for_field(namespace, field);
+    if config.tokenizer != Tokenizer::PreTokenizedArray && query.is_array() {
+        return Err(QueryError::new(format!(
+            "💔 invalid input '{}' for rank_by field \"{field}\", expecting string",
+            format_bm25_query_input(query)
+        )));
+    }
     let query_tokens = query_tokens_with_config(query, "BM25 query", &config)?;
     if query_tokens.is_empty() {
         return Ok(PreparedBm25Query { terms: Vec::new() });
@@ -3264,6 +3270,20 @@ fn prepare_bm25_query(
         });
     }
     Ok(PreparedBm25Query { terms })
+}
+
+fn format_bm25_query_input(query: &Value) -> String {
+    let Some(items) = query.as_array() else {
+        return query.to_string();
+    };
+    let values = items
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map_or_else(|| item.to_string(), ToString::to_string)
+        })
+        .collect::<Vec<_>>();
+    format!("[{}]", values.join(", "))
 }
 
 fn rank_documents<'a>(

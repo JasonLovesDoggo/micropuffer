@@ -577,6 +577,20 @@ async function assertErrorParity(): Promise<void> {
   expect(miniAggregateTopK.status).toBe(liveAggregateTopK.status);
   expect(miniAggregateTopK.body.status).toBe(liveAggregateTopK.body.status);
   expect(miniAggregateTopK.body.error).toBe(liveAggregateTopK.body.error);
+
+  const invalidBm25ArrayQuery: JsonObject = {
+    rank_by: ["text", "BM25", ["quick", "fish"]],
+    limit: 10
+  };
+  const liveBm25Array = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(namespaceName)}/query`,
+    invalidBm25ArrayQuery
+  );
+  const miniBm25Array = miniQueryError(namespaceName, invalidBm25ArrayQuery);
+  expect(miniBm25Array.status).toBe(liveBm25Array.status);
+  expect(miniBm25Array.body.status).toBe(liveBm25Array.body.status);
+  expect(miniBm25Array.body.error).toBe(liveBm25Array.body.error);
 }
 
 async function assertBranchParityIfAllowed(lookup: JsonObject): Promise<void> {

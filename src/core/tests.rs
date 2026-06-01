@@ -304,8 +304,11 @@ fn bm25_and_rank_operators_score_higher_matches_first() {
             "limit": 3
         }),
     )
-    .unwrap();
-    assert_eq!(rows(&token_array)[0]["id"], 3);
+    .unwrap_err();
+    assert_eq!(
+        token_array.to_string(),
+        "💔 invalid input '[rust, hybrid]' for rank_by field \"body\", expecting string"
+    );
 }
 
 #[test]
