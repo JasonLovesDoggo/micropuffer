@@ -4710,7 +4710,8 @@ fn score_bm25_index(index: &FtsFieldIndex, query: &PreparedBm25Query) -> Vec<(us
     if index.doc_count == 0 || index.avg_len <= 0.0 {
         return Vec::new();
     }
-    let mut scores: HashMap<usize, f64> = HashMap::new();
+    let mut scores = vec![0.0; index.doc_lengths.len()];
+    let mut touched_docs = Vec::new();
     for term in &query.terms {
         if term.prefix {
             let mut seen_docs = BTreeSet::new();
@@ -4720,8 +4721,7 @@ fn score_bm25_index(index: &FtsFieldIndex, query: &PreparedBm25Query) -> Vec<(us
                 }
                 for posting in postings {
                     if seen_docs.insert(posting.doc_index) {
-                        let score = scores.entry(posting.doc_index).or_insert(0.0);
-                        *score += 1.0;
+                        add_indexed_score(&mut scores, &mut touched_docs, posting.doc_index, 1.0);
                     }
                 }
             }
@@ -4741,20 +4741,42 @@ fn score_bm25_index(index: &FtsFieldIndex, query: &PreparedBm25Query) -> Vec<(us
             if doc_len == 0 {
                 continue;
             }
-            let score = scores.entry(posting.doc_index).or_insert(0.0);
-            *score += bm25_term_score(
-                index,
-                doc_freq,
-                posting.term_frequency,
-                doc_len,
-                term.query_frequency,
+            add_indexed_score(
+                &mut scores,
+                &mut touched_docs,
+                posting.doc_index,
+                bm25_term_score(
+                    index,
+                    doc_freq,
+                    posting.term_frequency,
+                    doc_len,
+                    term.query_frequency,
+                ),
             );
         }
     }
-    scores
+    touched_docs
         .into_iter()
-        .filter(|(_, score)| *score != 0.0)
+        .filter_map(|doc_index| {
+            let score = scores.get(doc_index).copied().unwrap_or(0.0);
+            (score != 0.0).then_some((doc_index, score))
+        })
         .collect()
+}
+
+fn add_indexed_score(
+    scores: &mut [f64],
+    touched_docs: &mut Vec<usize>,
+    doc_index: usize,
+    delta: f64,
+) {
+    let Some(score) = scores.get_mut(doc_index) else {
+        return;
+    };
+    if *score == 0.0 {
+        touched_docs.push(doc_index);
+    }
+    *score += delta;
 }
 
 fn bm25_term_score(
