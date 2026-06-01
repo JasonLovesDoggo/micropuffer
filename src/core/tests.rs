@@ -1283,7 +1283,7 @@ fn typed_dense_vectors_refresh_on_upsert_and_imported_stores() {
             &json!({
                 "distance_metric": "cosine_distance",
                 "schema": {
-                    "vector": "[2]f32",
+                    "vector": {"type": "[2]f32", "ann": true},
                     "sparse_vector": {
                         "type": "{}f16",
                         "sparse_knn": {"distance_metric": "dot_product"}
@@ -1868,7 +1868,7 @@ fn writes_enforce_schema_types_and_vector_invariants() {
             &json!({
                 "distance_metric": "cosine_distance",
                 "schema": {
-                    "vector": "[2]f32",
+                    "vector": {"type": "[2]f32", "ann": true},
                     "title": "string",
                     "score": "int"
                 },
@@ -2577,9 +2577,9 @@ fn schema_rejects_type_changes_and_too_many_vector_columns() {
             &json!({
                 "distance_metric": "cosine_distance",
                 "schema": {
-                    "vector": "[2]f32",
-                    "image_vector": "[2]f32",
-                    "audio_vector": "[2]f32"
+                    "vector": {"type": "[2]f32", "ann": true},
+                    "image_vector": {"type": "[2]f32", "ann": true},
+                    "audio_vector": {"type": "[2]f32", "ann": true}
                 }
             }),
         )
@@ -2968,6 +2968,38 @@ fn vector_writes_require_live_distance_metric_rules() {
     assert_eq!(
         missing_metric.to_string(),
         "💔 distance_metric must be specified for write to namespace with a vector"
+    );
+
+    let missing_ann = clone
+        .write(
+            "ann-required",
+            &json!({
+                "distance_metric": "cosine_distance",
+                "schema": {"vector": "[2]f32"},
+                "upsert_rows": [{"id": 1, "vector": [1.0, 0.0]}]
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(missing_ann.status_code(), 400);
+    assert_eq!(
+        missing_ann.to_string(),
+        "💔 the `vector` attribute must have `ann` set to `true`, eg: `\"vector\": { \"type\": \"[1024]f32\", \"ann\": true }`"
+    );
+
+    let custom_missing_ann = clone
+        .write(
+            "custom-ann-required",
+            &json!({
+                "distance_metric": "cosine_distance",
+                "schema": {"embedding": {"type": "[2]f32"}},
+                "upsert_rows": [{"id": 1, "embedding": [1.0, 0.0]}]
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(custom_missing_ann.status_code(), 400);
+    assert_eq!(
+        custom_missing_ann.to_string(),
+        "💔 vector attribute 'embedding' must have ann:true"
     );
 
     let schema_ann_metric = clone

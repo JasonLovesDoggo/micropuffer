@@ -21,6 +21,7 @@ const namespaceName = `${NAMESPACE_PREFIX}-${Date.now()}-${process.pid}`;
 const copyNamespaceName = `${namespaceName}-copy`;
 const branchNamespaceName = `${namespaceName}-branch`;
 const euclideanNamespaceName = `${namespaceName}-euclidean`;
+const base64NamespaceName = `${namespaceName}-base64`;
 const uuidNamespaceName = `${namespaceName}-uuid`;
 const uuidInvalidNamespaceName = `${namespaceName}-uuid-invalid`;
 const stringIdNamespaceName = `${namespaceName}-id-string`;
@@ -32,6 +33,7 @@ const namespacesToDelete = [
   copyNamespaceName,
   branchNamespaceName,
   euclideanNamespaceName,
+  base64NamespaceName,
   uuidNamespaceName,
   uuidInvalidNamespaceName,
   stringIdNamespaceName,
@@ -58,6 +60,7 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
   await deleteLiveNamespace(namespaceName);
   await deleteLiveNamespace(copyNamespaceName);
   await deleteLiveNamespace(branchNamespaceName);
+  await deleteLiveNamespace(base64NamespaceName);
   await deleteLiveNamespace(uuidNamespaceName);
   await deleteLiveNamespace(uuidInvalidNamespaceName);
   await deleteLiveNamespace(stringIdNamespaceName);
@@ -325,6 +328,7 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
   await assertErrorParity();
   await assertInvalidNamespaceParity();
   await assertEuclideanDistanceMetricParity();
+  await assertBase64VectorInputParity();
   await assertUuidIdSchemaParity();
   await assertTypedIdSchemaParity();
   await assertBranchParityIfAllowed(afterDeleteLookup);
@@ -855,6 +859,19 @@ async function assertErrorParity(): Promise<void> {
   const miniSchemaAnnMetric = miniWriteError(metricNamespace, schemaAnnMetricWrite);
   expectErrorParity(miniSchemaAnnMetric, liveSchemaAnnMetric);
 
+  const missingAnnWrite: JsonObject = {
+    distance_metric: "cosine_distance",
+    schema: { vector: "[2]f32" },
+    upsert_rows: [{ id: 1, vector: [1, 0] }]
+  };
+  const liveMissingAnn = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(metricNamespace)}`,
+    missingAnnWrite
+  );
+  const miniMissingAnn = miniWriteError(metricNamespace, missingAnnWrite);
+  expectErrorParity(miniMissingAnn, liveMissingAnn);
+
   const invalidMetricWrite: JsonObject = {
     distance_metric: "bad",
     upsert_rows: [{ id: 1, vector: [1, 0] }]
@@ -1018,6 +1035,26 @@ async function assertEuclideanDistanceMetricParity(): Promise<void> {
       "micropuffer vector schema"
     ).ann
   );
+}
+
+async function assertBase64VectorInputParity(): Promise<void> {
+  await deleteLiveNamespace(base64NamespaceName);
+  const encodedVector = float32Base64([1, 0]);
+  const write: JsonObject = {
+    distance_metric: "cosine_distance",
+    schema: { vector: { type: "[2]f32", ann: true } },
+    upsert_rows: [{ id: 1, vector: encodedVector, title: "base64" }],
+    return_affected_ids: true
+  };
+  expectJsonParity(await liveWrite(base64NamespaceName, write), miniWrite(base64NamespaceName, write));
+
+  const query: JsonObject = {
+    rank_by: ["vector", "ANN", encodedVector],
+    limit: 1,
+    include_attributes: ["vector"],
+    vector_encoding: "base64"
+  };
+  expectJsonParity(await liveQuery(base64NamespaceName, query), miniQuery(base64NamespaceName, query));
 }
 
 async function assertUuidIdSchemaParity(): Promise<void> {
@@ -1484,6 +1521,12 @@ function namespaceId(value: JsonValue): string {
     throw new Error("namespace list item did not contain an id.");
   }
   return value.id;
+}
+
+function float32Base64(values: number[]): string {
+  const buffer = Buffer.alloc(values.length * 4);
+  values.forEach((value, index) => buffer.writeFloatLE(value, index * 4));
+  return buffer.toString("base64");
 }
 
 function schemaTypes(metadata: JsonObject): JsonObject {
