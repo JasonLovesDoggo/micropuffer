@@ -38,6 +38,8 @@ jobs:
 
       - run: just wasm
 
+      - run: just test-wasm
+
       - name: Live parity
         env:
           TURBOPUFFER_API_KEY: ${{ secrets.TURBOPUFFER_API_KEY }}

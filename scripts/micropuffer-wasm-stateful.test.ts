@@ -54,7 +54,26 @@ test("stateful wasm engine owns query/write state in wasm memory", () => {
     engine.exportNamespace(namespaceName, json({ limit: 10 })),
     "namespace export response"
   );
-  expect(exported.rows).toHaveLength(2);
+  expect(exported.ids).toStrictEqual([1, 2]);
+  expect(exported.vectors).toStrictEqual([[1, 0], [0, 1]]);
+  expect(exported.attributes).toStrictEqual({
+    score: [10, 4],
+    tags: [["arctic", "mammal"], ["reef", "fish"]],
+    title: ["walrus field notes", "reef fish field notes"]
+  });
+
+  const invalidProjection = parseJsonObject(
+    engine.queryResponse(
+      namespaceName,
+      json({ rank_by: ["id", "asc"], limit: 1, exclude_attributes: true })
+    ),
+    "query response envelope"
+  );
+  expect(invalidProjection.status).toBe(422);
+  expect(invalidProjection.body).toStrictEqual({
+    status: "error",
+    error: "Failed to deserialize the JSON body into the target type: invalid type: boolean `true`, expected a sequence"
+  });
 
   const replacement = Micropuffer.fromStore(engine.exportStore());
   expect(

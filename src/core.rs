@@ -1303,6 +1303,7 @@ fn query_single(
             "💔 cannot specify both include_attributes and exclude_attributes",
         ));
     }
+    validate_projection_shape(object)?;
     if let Some(aggregate_by) = object.get("aggregate_by") {
         if object.contains_key("include_attributes") {
             return Err(QueryError::new(
@@ -2928,9 +2929,64 @@ fn parse_vector_encoding(value: Option<&Value>) -> Result<VectorEncoding, QueryE
         None => Ok(VectorEncoding::Float),
         Some(Value::String(encoding)) if encoding == "float" => Ok(VectorEncoding::Float),
         Some(Value::String(encoding)) if encoding == "base64" => Ok(VectorEncoding::Base64),
-        Some(_) => Err(QueryError::new(
-            "vector_encoding must be either 'float' or 'base64'.",
-        )),
+        Some(Value::String(encoding)) => Err(QueryError::unprocessable(format!(
+            "Failed to deserialize the JSON body into the target type: vector_encoding: unknown variant `{encoding}`, expected `float` or `base64`"
+        ))),
+        Some(value) => Err(QueryError::unprocessable(format!(
+            "Failed to deserialize the JSON body into the target type: vector_encoding: invalid type: {}, expected `float` or `base64`",
+            serde_type_name(value)
+        ))),
+    }
+}
+
+fn validate_projection_shape(object: &Map<String, Value>) -> Result<(), QueryError> {
+    if let Some(include_attributes) = object.get("include_attributes") {
+        match include_attributes {
+            Value::Bool(_) => {}
+            Value::Array(attributes) if attributes.iter().all(Value::is_string) => {}
+            _ => {
+                return Err(QueryError::unprocessable(
+                    "Failed to deserialize the JSON body into the target type: data did not match any variant of untagged enum IncludeAttributes",
+                ));
+            }
+        }
+    }
+    if let Some(exclude_attributes) = object.get("exclude_attributes") {
+        let attributes = match exclude_attributes {
+            Value::Array(attributes) => attributes,
+            Value::Bool(value) => {
+                return Err(QueryError::unprocessable(format!(
+                    "Failed to deserialize the JSON body into the target type: invalid type: boolean `{value}`, expected a sequence"
+                )));
+            }
+            value => {
+                return Err(QueryError::unprocessable(format!(
+                    "Failed to deserialize the JSON body into the target type: invalid type: {}, expected a sequence",
+                    serde_type_name(value)
+                )));
+            }
+        };
+        if let Some(invalid) = attributes.iter().find(|attribute| !attribute.is_string()) {
+            return Err(QueryError::unprocessable(format!(
+                "Failed to deserialize the JSON body into the target type: invalid type: {}, expected a string",
+                serde_type_name(invalid)
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn serde_type_name(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(value) => format!("boolean `{value}`"),
+        Value::Number(number) if number.is_i64() || number.is_u64() => {
+            format!("integer `{number}`")
+        }
+        Value::Number(number) => format!("floating point `{number}`"),
+        Value::String(value) => format!("string `{value}`"),
+        Value::Array(_) => "sequence".to_string(),
+        Value::Object(_) => "map".to_string(),
     }
 }
 
