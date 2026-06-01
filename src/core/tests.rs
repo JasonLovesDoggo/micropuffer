@@ -104,6 +104,50 @@ fn top_k_selection_preserves_exact_tie_order() {
 }
 
 #[test]
+fn limit_per_diversifies_attribute_order_and_rejects_other_rankers() {
+    let response = query_namespace(
+        &namespace(),
+        &json!({
+            "rank_by": ["id", "asc"],
+            "limit": {
+                "total": 3,
+                "per": {"attributes": ["tenant_id"], "limit": 1}
+            },
+            "include_attributes": ["tenant_id"]
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(
+        rows(&response)
+            .iter()
+            .map(|row| json!({"id": row["id"], "tenant_id": row["tenant_id"]}))
+            .collect::<Vec<_>>(),
+        vec![
+            json!({"id": 1, "tenant_id": "alpha"}),
+            json!({"id": 2, "tenant_id": "beta"})
+        ]
+    );
+
+    let error = query_namespace(
+        &namespace(),
+        &json!({
+            "rank_by": ["body", "BM25", "rust"],
+            "limit": {
+                "total": 3,
+                "per": {"attributes": ["tenant_id"], "limit": 1}
+            }
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("💔 `limit.per` is only supported when ranking by an attribute")
+    );
+}
+
+#[test]
 fn knn_requires_filters() {
     let error = query_namespace(
         &namespace(),
