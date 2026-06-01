@@ -755,12 +755,35 @@ fn aggregates_and_grouped_aggregates_apply_filters() {
             .contains("💔 aggregate_by currently requires exactly one function")
     );
 
+    let top_k_error = query_namespace(
+        &namespace(),
+        &json!({
+            "aggregate_by": {"count": ["Count"]},
+            "top_k": 10
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        top_k_error
+            .to_string()
+            .contains("💔 top_k is not supported in aggregation queries without group_by")
+    );
+
+    let limit_error = query_namespace(
+        &namespace(),
+        &json!({
+            "aggregate_by": {"count": ["Count"]},
+            "limit": 10
+        }),
+    )
+    .unwrap_err();
+    assert!(limit_error.to_string().contains("unknown field `limit`"));
+
     let grouped = query_namespace(
         &namespace(),
         &json!({
             "aggregate_by": {"count": ["Count"]},
-            "group_by": ["tenant_id", {"tag": ["ForEachUnique", "tags"]}],
-            "limit": {"total": 10}
+            "group_by": ["tenant_id", {"tag": ["ForEachUnique", "tags"]}]
         }),
     )
     .unwrap();
@@ -777,7 +800,7 @@ fn aggregates_and_grouped_aggregates_apply_filters() {
         &json!({
             "aggregate_by": {"score_sum": ["Sum", "score"]},
             "group_by": ["tenant_id"],
-            "limit": {"total": 10}
+            "top_k": 10
         }),
     )
     .unwrap();
@@ -869,7 +892,7 @@ fn multi_query_preserves_result_order() {
         &json!({
             "queries": [
                 {"rank_by": ["vector", "ANN", [0.0, 0.0]], "limit": 1},
-                {"aggregate_by": {"count": ["Count"]}, "limit": 1}
+                {"aggregate_by": {"count": ["Count"]}}
             ]
         }),
     )
@@ -2106,10 +2129,7 @@ fn micropuffer_lists_copies_and_deletes_namespaces() {
     let namespaces = listed.get("namespaces").and_then(Value::as_array).unwrap();
     assert_eq!(namespaces.len(), 2);
     let copied = clone
-        .query(
-            "demo-copy",
-            &json!({"aggregate_by": {"count": ["Count"]}, "limit": 1}),
-        )
+        .query("demo-copy", &json!({"aggregate_by": {"count": ["Count"]}}))
         .unwrap();
     assert_eq!(copied["aggregations"]["count"], 3);
     let deleted = clone.delete_namespace("demo-copy").unwrap();
