@@ -1087,7 +1087,7 @@ pub fn recall_namespace(namespace: &Namespace, request: &Value) -> Result<Value,
         .get("num")
         .and_then(value_as_u64)
         .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(10)
+        .unwrap_or(25)
         .clamp(1, 100);
     let top_k = object
         .get("top_k")
@@ -1143,10 +1143,7 @@ pub fn recall_namespace(namespace: &Namespace, request: &Value) -> Result<Value,
     let avg_count = candidates.len().min(top_k) as f64;
     let mut response = Map::new();
     response.insert("avg_recall".to_string(), json!(1.0));
-    response.insert(
-        "avg_exhaustive_count".to_string(),
-        number_value(candidates.len() as f64),
-    );
+    response.insert("avg_exhaustive_count".to_string(), number_value(avg_count));
     response.insert("avg_ann_count".to_string(), number_value(avg_count));
     if include_ground_truth {
         response.insert("ground_truth".to_string(), Value::Array(ground_truth));
