@@ -73,7 +73,7 @@ MICROPUFFER_BENCH_QUERY_RUNS=3
 MICROPUFFER_BENCH_KEEP_NAMESPACE=1
 ```
 
-The benchmark covers row writes, ANN, BM25, sparse vector search, filtered order-by, count aggregation, and grouped count aggregation. It prints a Markdown table plus JSON summaries for copying into issues or release notes.
+The benchmark covers row writes, ANN, BM25, sparse vector search, filtered order-by, count aggregation, and grouped count aggregation. Query cases run one unmeasured warm-up before recorded samples. It prints a Markdown table plus JSON summaries for copying into issues or release notes.
 
 Run the local stateful WASM benchmark without live API credentials:
 

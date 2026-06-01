@@ -54,6 +54,7 @@ function main(): void {
 
   for (const queryCase of queryCases()) {
     const requestJson = json(queryCase.request);
+    engine.query(namespaceName, requestJson);
     for (let run = 0; run < queryRuns; run += 1) {
       samples.push(
         timeSync(queryCase.operation, "stateful", () =>
