@@ -11,6 +11,7 @@ use rust_stemmers::{Algorithm, Stemmer};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value, json};
+use std::cell::OnceCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Mutex, MutexGuard};
@@ -732,8 +733,8 @@ struct PreparedBm25Term {
 
 #[derive(Debug, Clone)]
 struct PreparedBm25Scores {
-    by_doc: HashMap<usize, f64>,
     ranked: Vec<(usize, f64)>,
+    by_doc: OnceCell<HashMap<usize, f64>>,
 }
 
 #[derive(Debug, Clone)]
@@ -754,12 +755,18 @@ struct FtsPosting {
 
 impl PreparedBm25Scores {
     fn new(ranked: Vec<(usize, f64)>) -> Self {
-        let by_doc = ranked.iter().copied().collect();
-        Self { by_doc, ranked }
+        Self {
+            ranked,
+            by_doc: OnceCell::new(),
+        }
     }
 
     fn score(&self, doc_index: usize) -> f64 {
-        self.by_doc.get(&doc_index).copied().unwrap_or(0.0)
+        self.by_doc
+            .get_or_init(|| self.ranked.iter().copied().collect())
+            .get(&doc_index)
+            .copied()
+            .unwrap_or(0.0)
     }
 }
 
