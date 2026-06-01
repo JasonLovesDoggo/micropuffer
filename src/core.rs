@@ -1565,6 +1565,7 @@ fn infer_id_schema_type(namespace: &Namespace) -> Value {
         .map(|document| match &document.id {
             Value::Number(number) if number.as_u64().is_some() => json!("uint"),
             Value::Number(number) if number.as_i64().is_some_and(|id| id >= 0) => json!("uint"),
+            Value::Number(number) if legacy_float_id_key(number).is_some() => json!("uint"),
             Value::Number(_) => json!("int"),
             Value::String(_) => json!("string"),
             _ => json!("string"),
@@ -1967,6 +1968,9 @@ fn validate_schema_definition(
     definition: &Value,
     schema_type: &str,
 ) -> Result<(), QueryError> {
+    if attribute == "id" {
+        validate_id_schema_type(schema_type)?;
+    }
     let Some(object) = definition.as_object() else {
         return Ok(());
     };
@@ -2025,6 +2029,13 @@ fn validate_schema_definition(
         }
     }
     Ok(())
+}
+
+fn validate_id_schema_type(schema_type: &str) -> Result<(), QueryError> {
+    if matches!(schema_type, "string" | "uint" | "uuid") {
+        return Ok(());
+    }
+    Err(invalid_id_schema_type_error(schema_type))
 }
 
 fn validate_ann_config(attribute: &str, value: &Value) -> Result<(), QueryError> {
@@ -3130,11 +3141,10 @@ fn effective_write_id_schema_type(
     if requested.is_some() {
         return Ok(requested);
     }
-    namespace
-        .and_then(|namespace| namespace.schema.get("id"))
-        .map(schema_type_name)
-        .transpose()
-        .map(|schema_type| schema_type.map(ToString::to_string))
+    let Some(namespace) = namespace else {
+        return Ok(None);
+    };
+    namespace_id_schema_type(namespace).map(Some)
 }
 
 fn normalize_write_ids_against_id_schema(
@@ -3143,7 +3153,27 @@ fn normalize_write_ids_against_id_schema(
     patches: &mut [WriteRow],
     deletes: &mut [Value],
 ) -> Result<(), QueryError> {
-    if id_schema_type != Some("uuid") {
+    let Some(id_schema_type) = id_schema_type else {
+        return Ok(());
+    };
+    validate_id_schema_type(id_schema_type)?;
+    if id_schema_type == "uuid" {
+        let all_ids = upserts
+            .iter()
+            .map(|row| &row.id)
+            .chain(patches.iter().map(|row| &row.id))
+            .chain(deletes.iter());
+        for id in all_ids {
+            canonical_uuid_write_id(id)?;
+        }
+        for id in upserts
+            .iter_mut()
+            .map(|row| &mut row.id)
+            .chain(patches.iter_mut().map(|row| &mut row.id))
+            .chain(deletes.iter_mut())
+        {
+            *id = Value::String(canonical_uuid_write_id(id)?);
+        }
         return Ok(());
     }
     let all_ids = upserts
@@ -3152,24 +3182,54 @@ fn normalize_write_ids_against_id_schema(
         .chain(patches.iter().map(|row| &row.id))
         .chain(deletes.iter());
     for id in all_ids {
-        canonical_uuid_id(id)?;
-    }
-    for id in upserts
-        .iter_mut()
-        .map(|row| &mut row.id)
-        .chain(patches.iter_mut().map(|row| &mut row.id))
-        .chain(deletes.iter_mut())
-    {
-        *id = Value::String(canonical_uuid_id(id)?);
+        let actual_type = document_id_type(id)?;
+        if actual_type != id_schema_type {
+            return Err(id_type_mismatch_error(id_schema_type, actual_type));
+        }
     }
     Ok(())
+}
+
+fn namespace_id_schema_type(namespace: &Namespace) -> Result<String, QueryError> {
+    if let Some(definition) = namespace.schema.get("id") {
+        return schema_type_name(definition).map(ToString::to_string);
+    }
+    schema_type_name(&infer_id_schema_type(namespace)).map(ToString::to_string)
+}
+
+fn invalid_id_schema_type_error(schema_type: &str) -> QueryError {
+    QueryError::new(format!("💔 {schema_type} is not a valid ID type"))
+}
+
+fn document_id_type(id: &Value) -> Result<&'static str, QueryError> {
+    match id {
+        Value::Number(number) if number.as_u64().is_some() => Ok("uint"),
+        Value::Number(number) if legacy_float_id_key(number).is_some() => Ok("uint"),
+        Value::String(_) => Ok("string"),
+        _ => Err(QueryError::new(
+            "document IDs must be unsigned integers or strings up to 64 bytes.",
+        )),
+    }
+}
+
+fn id_type_mismatch_error(expected: &str, actual: &str) -> QueryError {
+    QueryError::new(format!(
+        "💔 namespace ID type is {expected}, but you sent {actual}; you are not allowed to mix ID types in the same namespace"
+    ))
 }
 
 fn uuid_id_error() -> QueryError {
     QueryError::new("💔 namespace ID type is uuid, but a written ID could not be parsed as uuid")
 }
 
-fn canonical_uuid_id(id: &Value) -> Result<String, QueryError> {
+fn canonical_uuid_write_id(id: &Value) -> Result<String, QueryError> {
+    if document_id_type(id)? != "string" {
+        return Err(id_type_mismatch_error("uuid", document_id_type(id)?));
+    }
+    canonical_uuid_filter_id(id).map_err(|_| uuid_id_error())
+}
+
+fn canonical_uuid_filter_id(id: &Value) -> Result<String, QueryError> {
     let Some(text) = id.as_str() else {
         return Err(uuid_id_error());
     };
@@ -4027,10 +4087,23 @@ fn indexed_filter_candidates(
     if op != "Eq" {
         return Ok(None);
     }
-    let Some(key) = scalar_eq_key(&array[2]) else {
+    let eq_value = normalized_indexed_eq_value(namespace, attr, &array[2])?;
+    let Some(key) = scalar_eq_key(eq_value.as_ref().unwrap_or(&array[2])) else {
         return Ok(None);
     };
     Ok(Some(equality_postings(namespace, attr, &key)))
+}
+
+fn normalized_indexed_eq_value(
+    namespace: &Namespace,
+    attr: &str,
+    value: &Value,
+) -> Result<Option<Value>, QueryError> {
+    if attr != "id" {
+        return Ok(None);
+    }
+    let id_schema_type = namespace_id_schema_type(namespace)?;
+    normalize_id_filter_scalar(&id_schema_type, "Eq", value).map(Some)
 }
 
 fn indexed_and_candidates(
@@ -5023,6 +5096,128 @@ fn eval_filter(document: &Document, filter: &Value) -> Result<bool, QueryError> 
     eval_filter_with_schema(document, filter, None)
 }
 
+fn filter_id_schema_type(
+    schema: Option<&Map<String, Value>>,
+    attr: &str,
+    document_id: Option<&Value>,
+) -> Result<Option<String>, QueryError> {
+    if attr != "id" {
+        return Ok(None);
+    }
+    if let Some(definition) = schema.and_then(|schema| schema.get("id")) {
+        return schema_type_name(definition).map(|schema_type| Some(schema_type.to_string()));
+    }
+    document_id
+        .map(document_id_type)
+        .transpose()
+        .map(|schema_type| schema_type.map(ToString::to_string))
+}
+
+fn normalize_id_filter_operand(
+    id_schema_type: Option<String>,
+    op: &str,
+    expected: &Value,
+) -> Result<Option<Value>, QueryError> {
+    let Some(id_schema_type) = id_schema_type else {
+        return Ok(None);
+    };
+    validate_id_schema_type(&id_schema_type)?;
+    match op {
+        "Eq" | "NotEq" | "Lt" | "Lte" | "Gt" | "Gte" if !expected.is_null() => {
+            normalize_id_filter_scalar(&id_schema_type, op, expected).map(Some)
+        }
+        "In" | "NotIn" => normalize_id_filter_array(&id_schema_type, op, expected).map(Some),
+        _ => Ok(None),
+    }
+}
+
+fn normalize_id_filter_array(
+    id_schema_type: &str,
+    op: &str,
+    expected: &Value,
+) -> Result<Value, QueryError> {
+    let Some(items) = expected.as_array() else {
+        return Err(id_filter_type_mismatch_error(
+            op,
+            id_filter_expected_array_type(id_schema_type),
+            expected,
+        ));
+    };
+    let expected_type = id_filter_expected_array_type(id_schema_type);
+    let mut normalized = Vec::with_capacity(items.len());
+    for item in items {
+        match normalize_id_filter_scalar_with_expected(id_schema_type, op, expected_type, item) {
+            Ok(value) => normalized.push(value),
+            Err(_) => return Err(id_filter_type_mismatch_error(op, expected_type, expected)),
+        }
+    }
+    Ok(Value::Array(normalized))
+}
+
+fn normalize_id_filter_scalar(
+    id_schema_type: &str,
+    op: &str,
+    expected: &Value,
+) -> Result<Value, QueryError> {
+    normalize_id_filter_scalar_with_expected(id_schema_type, op, id_schema_type, expected)
+}
+
+fn normalize_id_filter_scalar_with_expected(
+    id_schema_type: &str,
+    op: &str,
+    expected_type: &str,
+    expected: &Value,
+) -> Result<Value, QueryError> {
+    match id_schema_type {
+        "uuid" => {
+            let Some(text) = expected.as_str() else {
+                return Err(id_filter_type_mismatch_error(op, expected_type, expected));
+            };
+            canonical_uuid_text(text)
+                .map(Value::String)
+                .ok_or_else(|| id_filter_type_mismatch_error(op, expected_type, expected))
+        }
+        "string" if expected.as_str().is_some() => Ok(expected.clone()),
+        "uint" => match expected {
+            Value::Number(number) if number.as_u64().is_some() => Ok(expected.clone()),
+            _ => Err(id_filter_type_mismatch_error(op, expected_type, expected)),
+        },
+        "string" => Err(id_filter_type_mismatch_error(op, expected_type, expected)),
+        other => Err(invalid_id_schema_type_error(other)),
+    }
+}
+
+fn id_filter_expected_array_type(id_schema_type: &str) -> &'static str {
+    match id_schema_type {
+        "uuid" => "uuid or []uuid",
+        "string" => "string or []string",
+        "uint" => "uint or []uint",
+        _ => "valid ID type",
+    }
+}
+
+fn id_filter_type_mismatch_error(op: &str, expected_type: &str, actual: &Value) -> QueryError {
+    QueryError::new(format!(
+        "filter error in key `id`: type mismatch, {op} expects {expected_type}, but got '{}'",
+        filter_value_error_display(actual)
+    ))
+}
+
+fn filter_value_error_display(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(filter_value_error_display)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => value.to_string(),
+    }
+}
+
 fn eval_filter_with_schema(
     document: &Document,
     filter: &Value,
@@ -5080,6 +5275,12 @@ fn eval_filter_with_schema(
     let op = as_string(&array[1], "filter operator")?;
     let expected = &array[2];
     let options = array.get(3);
+    let normalized_expected = normalize_id_filter_operand(
+        filter_id_schema_type(schema, attr, Some(&document.id))?,
+        op,
+        expected,
+    )?;
+    let expected = normalized_expected.as_ref().unwrap_or(expected);
     let actual = document_attr(document, attr).unwrap_or(&Value::Null);
     match op {
         "Eq" => Ok(values_equal(actual, expected)),

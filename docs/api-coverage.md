@@ -26,7 +26,7 @@ Sources checked:
   - top-level `distance_metric` requirement when schema `ann.distance_metric` is present
   - distance metric mismatch rejection
   - scalar namespace rejection when adding a vector later
-  - `schema.id = "uuid"` validation, canonical ID normalization, and invalid UUID rejection for row, column, patch, and delete writes
+  - `schema.id` validation for `string`, `uint`, and `uuid`, including canonical UUID ID normalization and invalid/mixed ID rejection for row, column, patch, and delete writes
 - `POST /v2/namespaces/:namespace/query`
   - `ANN`
   - distance metrics: `cosine_distance`, `euclidean`, `euclidean_squared`
@@ -38,6 +38,7 @@ Sources checked:
   - order by multiple attributes
   - rank expressions using `Sum`, `Max`, `Product`, `Attribute`, filters-as-scores
   - filters: equality, membership, array containment, numeric comparisons, array comparisons, glob, case-insensitive glob, regex, fuzzy, token filters, boolean combinators
+  - typed `id` filter validation and UUID ID filter canonicalization
   - projections with `include_attributes`
   - projections with `include_attributes: true`
   - projections with `include_attributes: false`
