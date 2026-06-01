@@ -292,6 +292,24 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
   };
   expectJsonParity(await liveQuery(namespaceName, multiQuery), miniQuery(namespaceName, multiQuery));
 
+  const multiQueryRootFields: JsonObject = {
+    queries: [
+      {
+        rank_by: ["id", "asc"],
+        limit: 1,
+        include_attributes: ["vector"]
+      }
+    ],
+    rank_by: ["id", "desc"],
+    filters: ["public", "Eq", 0],
+    aggregate_by: { count: ["Count"] },
+    vector_encoding: "base64"
+  };
+  expectJsonParity(
+    await liveQuery(namespaceName, multiQueryRootFields),
+    miniQuery(namespaceName, multiQueryRootFields)
+  );
+
   const patchByFilter: JsonObject = {
     patch_by_filter: {
       filters: ["category", "Eq", "fish"],
@@ -886,6 +904,53 @@ async function assertErrorParity(): Promise<void> {
   );
   const miniInvalidLimitShape = miniQueryError(namespaceName, invalidLimitShapeQuery);
   expectErrorParity(miniInvalidLimitShape, liveInvalidLimitShape);
+
+  const invalidQueriesShapeQuery: JsonObject = {
+    queries: "bad"
+  };
+  const liveInvalidQueriesShape = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(namespaceName)}/query`,
+    invalidQueriesShapeQuery
+  );
+  const miniInvalidQueriesShape = miniQueryError(namespaceName, invalidQueriesShapeQuery);
+  expectErrorParity(miniInvalidQueriesShape, liveInvalidQueriesShape);
+
+  const emptyQueriesQuery: JsonObject = {
+    queries: []
+  };
+  const liveEmptyQueries = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(namespaceName)}/query`,
+    emptyQueriesQuery
+  );
+  const miniEmptyQueries = miniQueryError(namespaceName, emptyQueriesQuery);
+  expectErrorParity(miniEmptyQueries, liveEmptyQueries);
+
+  const tooManyQueriesQuery: JsonObject = {
+    queries: Array.from({ length: 17 }, () => ({
+      rank_by: ["id", "asc"],
+      limit: 1
+    }))
+  };
+  const liveTooManyQueries = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(namespaceName)}/query`,
+    tooManyQueriesQuery
+  );
+  const miniTooManyQueries = miniQueryError(namespaceName, tooManyQueriesQuery);
+  expectErrorParity(miniTooManyQueries, liveTooManyQueries);
+
+  const invalidSubqueryShapeQuery: JsonObject = {
+    queries: ["bad"]
+  };
+  const liveInvalidSubqueryShape = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(namespaceName)}/query`,
+    invalidSubqueryShapeQuery
+  );
+  const miniInvalidSubqueryShape = miniQueryError(namespaceName, invalidSubqueryShapeQuery);
+  expectErrorParity(miniInvalidSubqueryShape, liveInvalidSubqueryShape);
 
   const invalidConsistencyLevelQuery: JsonObject = {
     rank_by: ["id", "asc"],
