@@ -33,7 +33,9 @@ Sources checked:
   - projections with `include_attributes`
   - projections with `exclude_attributes`
   - `vector_encoding: "base64"` output
+  - `limit.per` for order-by-attribute queries
   - ungrouped count aggregation
+  - ungrouped sum aggregation
   - grouped count aggregation
   - multi-query
 - `POST /v1/namespaces/:namespace/_debug/recall`, response-shape parity only
@@ -57,7 +59,6 @@ Sources checked:
 - `export_namespace` helper
 - metadata pinning helper
 - namespace delete helper
-- `limit.per` for order-by-attribute queries
 - multiple-attribute order-by, local extension for dashboard experiments; live docs currently describe ordering by one attribute
 - `Saturate`, `Decay`, and `Dist` rank operators
 - recall ground-truth projection
@@ -80,3 +81,4 @@ Sources checked:
 - OpenAPI allows `include_attributes: false`, but live turbopuffer currently rejects it with `include_attributes must be true or an array`.
 - OpenAPI lists BM25 array-token variants, but live turbopuffer currently rejects `["text", "BM25", ["quick", "fish"]]`.
 - Ungrouped aggregation rejects `top_k`; grouped aggregation requires a top-k style limit.
+- The query docs imply multiple `aggregate_by` labels can be supplied, but live turbopuffer currently rejects multiple aggregate functions with `💔 aggregate_by currently requires exactly one function`.
