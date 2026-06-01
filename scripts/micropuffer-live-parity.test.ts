@@ -515,16 +515,7 @@ async function assertMetadataParity(): Promise<void> {
   const liveSchema = requireObject(live.schema, "live metadata schema");
   const miniSchema = requireObject(mini.schema, "micropuffer metadata schema");
   expect(mini.encryption).toStrictEqual(live.encryption);
-  expect(requireObject(miniSchema.vector, "micropuffer metadata vector schema").ann).toStrictEqual(
-    requireObject(liveSchema.vector, "live metadata vector schema").ann
-  );
-  expect(requireObject(miniSchema.category, "micropuffer metadata category schema").filterable).toBe(
-    requireObject(liveSchema.category, "live metadata category schema").filterable
-  );
-  expect(requireObject(miniSchema.text, "micropuffer metadata text schema").full_text_search).toStrictEqual(
-    requireObject(liveSchema.text, "live metadata text schema").full_text_search
-  );
-  expect(schemaTypes(mini)).toStrictEqual(schemaTypes(live));
+  expectJsonParity(liveSchema, miniSchema);
 }
 
 async function assertSchemaParity(): Promise<void> {
