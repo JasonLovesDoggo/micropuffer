@@ -3643,14 +3643,18 @@ fn parse_limit(object: &Map<String, Value>) -> Result<Limit, QueryError> {
     }
     let limit = object
         .get("limit")
-        .ok_or_else(|| QueryError::new("limit is required."))?;
+        .ok_or_else(|| QueryError::new("💔 rank_by queries must specify top_k or limit"))?;
     if let Some(total) = value_as_u64(limit) {
         return Ok(Limit {
             total: clamp_limit(total, "limit")?,
             per: None,
         });
     }
-    let limit_object = as_object(limit, "limit")?;
+    let Some(limit_object) = limit.as_object() else {
+        return Err(QueryError::unprocessable(
+            "Failed to deserialize the JSON body into the target type: data did not match any variant of untagged enum LimitInput at line 1 column 38",
+        ));
+    };
     let total = parse_positive_usize(
         limit_object
             .get("total")
@@ -3693,6 +3697,9 @@ fn parse_positive_usize(value: &Value, label: &str) -> Result<usize, QueryError>
 
 fn clamp_limit(raw: u64, label: &str) -> Result<usize, QueryError> {
     if raw == 0 || raw > 10_000 {
+        if matches!(label, "limit" | "top_k") {
+            return Err(QueryError::new("💔 top_k must be between 1 and 10000"));
+        }
         return Err(QueryError::new(format!(
             "{label} must be between 1 and 10,000."
         )));
@@ -3701,7 +3708,12 @@ fn clamp_limit(raw: u64, label: &str) -> Result<usize, QueryError> {
 }
 
 fn parse_rank_plan<'a>(rank_by: &'a Value, has_filters: bool) -> Result<RankPlan<'a>, QueryError> {
-    let array = as_array(rank_by, "rank_by")?;
+    let Some(array) = rank_by.as_array() else {
+        return Err(rank_input_deserialize_error(27));
+    };
+    if array.is_empty() {
+        return Err(QueryError::new("💔 rank_by cannot be empty"));
+    }
     let kind = if !array.is_empty() && array.iter().all(Value::is_array) {
         let attributes = array
             .iter()
@@ -3727,6 +3739,12 @@ fn parse_rank_plan<'a>(rank_by: &'a Value, has_filters: bool) -> Result<RankPlan
         rank_expression_kind(rank_by, has_filters)?
     };
     Ok(RankPlan { rank_by, kind })
+}
+
+fn rank_input_deserialize_error(column: usize) -> QueryError {
+    QueryError::unprocessable(format!(
+        "Failed to deserialize the JSON body into the target type: data did not match any variant of enum a valid variant of RankInput at line 1 column {column}"
+    ))
 }
 
 fn parse_attribute_order(value: &Value) -> Result<(String, SortDirection), QueryError> {
@@ -3848,10 +3866,43 @@ fn prepare_rank_expr<'a>(
                     scores: PreparedBm25Scores::new(score_indexed_bm25(namespace, attr, &query)),
                 })
             }
-            _ => Ok(PreparedRankExpr::Filter(expression)),
+            _ if is_filter_operator(op) => Ok(PreparedRankExpr::Filter(expression)),
+            _ => Err(rank_input_deserialize_error(44)),
         };
     }
     Err(QueryError::new("unsupported rank expression."))
+}
+
+fn is_filter_operator(op: &str) -> bool {
+    matches!(
+        op,
+        "Eq" | "NotEq"
+            | "In"
+            | "NotIn"
+            | "Contains"
+            | "NotContains"
+            | "ContainsAny"
+            | "NotContainsAny"
+            | "Lt"
+            | "Lte"
+            | "Gt"
+            | "Gte"
+            | "AnyLt"
+            | "AnyLte"
+            | "AnyGt"
+            | "AnyGte"
+            | "Glob"
+            | "NotGlob"
+            | "IGlob"
+            | "NotIGlob"
+            | "Regex"
+            | "NotRegex"
+            | "ContainsAllTokens"
+            | "ContainsAnyToken"
+            | "ContainsTokenSequence"
+            | "Fuzzy"
+            | "NotFuzzy"
+    )
 }
 
 fn prepare_sum<'a>(
