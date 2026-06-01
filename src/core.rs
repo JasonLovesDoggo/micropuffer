@@ -710,22 +710,24 @@ pub fn write_store(
         .ok_or_else(|| QueryError::new("namespace disappeared during write."))?;
     validate_write_rows_against_schema(namespace, &upserts, &patches)?;
     normalize_write_rows_against_schema(namespace, &mut upserts, &mut patches)?;
-    for id in deletes {
-        if delete_document(namespace, &id, delete_condition)? {
-            summary.deleted_ids.push(id);
-        }
-    }
+    let mut write_id_index = WriteIdIndex::new(namespace);
+    summary.deleted_ids.extend(delete_documents(
+        namespace,
+        deletes,
+        delete_condition,
+        &mut write_id_index,
+    )?);
     for row in patches {
         summary.billable_logical_bytes_written += write_row_logical_bytes(&row);
         let id = row.id.clone();
-        if patch_document(namespace, row, patch_condition)? {
+        if patch_document(namespace, row, patch_condition, &write_id_index)? {
             summary.patched_ids.push(id);
         }
     }
     for row in upserts {
         summary.billable_logical_bytes_written += write_row_logical_bytes(&row);
         let id = row.id.clone();
-        if upsert_document(namespace, row, upsert_condition)? {
+        if upsert_document(namespace, row, upsert_condition, &mut write_id_index)? {
             summary.upserted_ids.push(id);
         }
     }
@@ -1581,6 +1583,33 @@ struct WriteRow {
 }
 
 #[derive(Debug)]
+struct WriteIdIndex {
+    indexes: HashMap<String, usize>,
+}
+
+impl WriteIdIndex {
+    fn new(namespace: &Namespace) -> Self {
+        let mut indexes = HashMap::with_capacity(namespace.documents.len());
+        for (index, document) in namespace.documents.iter().enumerate() {
+            indexes.entry(id_key(&document.id)).or_insert(index);
+        }
+        Self { indexes }
+    }
+
+    fn get(&self, id: &Value) -> Option<usize> {
+        self.indexes.get(&id_key(id)).copied()
+    }
+
+    fn insert_new(&mut self, id: &Value, index: usize) {
+        self.indexes.insert(id_key(id), index);
+    }
+
+    fn rebuild(&mut self, namespace: &Namespace) {
+        *self = Self::new(namespace);
+    }
+}
+
+#[derive(Debug)]
 struct FilterWriteOutcome {
     ids: Vec<Value>,
     rows_remaining: bool,
@@ -1940,9 +1969,9 @@ fn upsert_document(
     namespace: &mut Namespace,
     row: WriteRow,
     condition: Option<&Value>,
+    id_index: &mut WriteIdIndex,
 ) -> Result<bool, QueryError> {
-    let existing_index = document_index(namespace, &row.id);
-    if let Some(index) = existing_index {
+    if let Some(index) = id_index.get(&row.id) {
         if !condition
             .map(|filter| eval_filter_with_new(&namespace.documents[index], filter, Some(&row)))
             .transpose()?
@@ -1955,8 +1984,11 @@ fn upsert_document(
             attributes: row.attributes,
         };
     } else {
+        let index = namespace.documents.len();
+        let id = row.id;
+        id_index.insert_new(&id, index);
         namespace.documents.push(Document {
-            id: row.id,
+            id,
             attributes: row.attributes,
         });
     }
@@ -1967,8 +1999,9 @@ fn patch_document(
     namespace: &mut Namespace,
     row: WriteRow,
     condition: Option<&Value>,
+    id_index: &WriteIdIndex,
 ) -> Result<bool, QueryError> {
-    let Some(index) = document_index(namespace, &row.id) else {
+    let Some(index) = id_index.get(&row.id) else {
         return Ok(false);
     };
     if !condition
@@ -1984,23 +2017,39 @@ fn patch_document(
     Ok(true)
 }
 
-fn delete_document(
+fn delete_documents(
     namespace: &mut Namespace,
-    id: &Value,
+    ids: Vec<Value>,
     condition: Option<&Value>,
-) -> Result<bool, QueryError> {
-    let Some(index) = document_index(namespace, id) else {
-        return Ok(false);
-    };
-    if !condition
-        .map(|filter| eval_filter_with_new(&namespace.documents[index], filter, None))
-        .transpose()?
-        .unwrap_or(true)
-    {
-        return Ok(false);
+    id_index: &mut WriteIdIndex,
+) -> Result<Vec<Value>, QueryError> {
+    let mut deleted = Vec::new();
+    let mut indexes = Vec::new();
+    for id in ids {
+        let Some(index) = id_index.get(&id) else {
+            continue;
+        };
+        if condition
+            .map(|filter| eval_filter_with_new(&namespace.documents[index], filter, None))
+            .transpose()?
+            .unwrap_or(true)
+        {
+            deleted.push(id);
+            indexes.push(index);
+        }
     }
-    namespace.documents.remove(index);
-    Ok(true)
+    if !indexes.is_empty() {
+        let selected = indexes.into_iter().collect::<BTreeSet<_>>();
+        let mut kept = Vec::with_capacity(namespace.documents.len() - selected.len());
+        for (index, document) in namespace.documents.drain(..).enumerate() {
+            if !selected.contains(&index) {
+                kept.push(document);
+            }
+        }
+        namespace.documents = kept;
+        id_index.rebuild(namespace);
+    }
+    Ok(deleted)
 }
 
 fn delete_by_filter(
@@ -2107,13 +2156,6 @@ fn patch_by_filter(
     })
 }
 
-fn document_index(namespace: &Namespace, id: &Value) -> Option<usize> {
-    namespace
-        .documents
-        .iter()
-        .position(|document| values_equal(&document.id, id))
-}
-
 fn validate_document_id(id: &Value) -> Result<(), QueryError> {
     match id {
         Value::Number(number) if number.as_u64().is_some() => Ok(()),
@@ -2137,7 +2179,25 @@ fn validate_attribute_name(name: &str) -> Result<(), QueryError> {
 }
 
 fn id_key(id: &Value) -> String {
-    id.to_string()
+    match id {
+        Value::Number(number) => number
+            .as_u64()
+            .map(|id| format!("number:{id}"))
+            .or_else(|| legacy_float_id_key(number))
+            .unwrap_or_else(|| id.to_string()),
+        Value::String(text) => format!("string:{text}"),
+        _ => id.to_string(),
+    }
+}
+
+fn legacy_float_id_key(number: &Number) -> Option<String> {
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    let id = number.as_f64()?;
+    if id.is_finite() && (0.0..=MAX_SAFE_INTEGER).contains(&id) && id.fract() == 0.0 {
+        Some(format!("number:{}", id as u64))
+    } else {
+        None
+    }
 }
 
 impl Bm25Stats {
