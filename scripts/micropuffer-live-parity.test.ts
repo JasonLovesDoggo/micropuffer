@@ -632,6 +632,62 @@ async function assertErrorParity(): Promise<void> {
     `/v2/namespaces/${encodeURIComponent(missingNamespace)}`
   );
   expectErrorParity(miniDeleteNamespaceError(missingNamespace), liveMissingDelete);
+
+  const metricNamespace = `${namespaceName}-metric-error`;
+  await deleteLiveNamespace(metricNamespace);
+  const missingMetricWrite: JsonObject = {
+    upsert_rows: [{ id: 1, vector: [1, 0] }]
+  };
+  const liveMissingMetric = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(metricNamespace)}`,
+    missingMetricWrite
+  );
+  const miniMissingMetric = miniWriteError(metricNamespace, missingMetricWrite);
+  expectErrorParity(miniMissingMetric, liveMissingMetric);
+
+  const invalidMetricWrite: JsonObject = {
+    distance_metric: "bad",
+    upsert_rows: [{ id: 1, vector: [1, 0] }]
+  };
+  const liveInvalidMetric = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(metricNamespace)}`,
+    invalidMetricWrite
+  );
+  const miniInvalidMetric = miniWriteError(metricNamespace, invalidMetricWrite);
+  expectErrorParity(miniInvalidMetric, liveInvalidMetric);
+  await deleteLiveNamespace(metricNamespace);
+
+  const metricMismatchWrite: JsonObject = {
+    distance_metric: "euclidean_squared",
+    upsert_rows: [{ id: 99, vector: [0, 1] }]
+  };
+  const liveMetricMismatch = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(namespaceName)}`,
+    metricMismatchWrite
+  );
+  const miniMetricMismatch = miniWriteError(namespaceName, metricMismatchWrite);
+  expectErrorParity(miniMetricMismatch, liveMetricMismatch);
+
+  const scalarNamespace = `${namespaceName}-scalar-error`;
+  await deleteLiveNamespace(scalarNamespace);
+  const scalarSeed: JsonObject = {
+    upsert_rows: [{ id: 1, title: "scalar" }]
+  };
+  expectJsonParity(await liveWrite(scalarNamespace, scalarSeed), miniWrite(scalarNamespace, scalarSeed));
+  const addVectorToScalarWrite: JsonObject = {
+    upsert_rows: [{ id: 2, vector: [1, 0], title: "vector" }]
+  };
+  const liveAddVectorToScalar = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(scalarNamespace)}`,
+    addVectorToScalarWrite
+  );
+  const miniAddVectorToScalar = miniWriteError(scalarNamespace, addVectorToScalarWrite);
+  expectErrorParity(miniAddVectorToScalar, liveAddVectorToScalar);
+  await deleteLiveNamespace(scalarNamespace);
 }
 
 async function assertBranchParityIfAllowed(lookup: JsonObject): Promise<void> {
@@ -710,6 +766,14 @@ function miniQueryError(namespace: string, request: JsonObject): ErrorResult {
     "micropuffer query response envelope"
   );
   return errorResultFromEnvelope(response, "query");
+}
+
+function miniWriteError(namespace: string, request: JsonObject): ErrorResult {
+  const response = parseJsonObject(
+    micropuffer.writeResponse(namespace, JSON.stringify(request)),
+    "micropuffer write response envelope"
+  );
+  return errorResultFromEnvelope(response, "write");
 }
 
 function miniDeleteNamespaceError(namespace: string): ErrorResult {

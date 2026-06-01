@@ -14,7 +14,10 @@ pnpm add micropuffer
 import { Micropuffer } from "micropuffer";
 
 const engine = new Micropuffer();
-engine.write("local", JSON.stringify({ upsert_rows: [{ id: 1, vector: [1, 0] }] }));
+engine.write(
+  "local",
+  JSON.stringify({ distance_metric: "cosine_distance", upsert_rows: [{ id: 1, vector: [1, 0] }] })
+);
 const response = engine.query("local", JSON.stringify({ rank_by: ["id", "asc"], limit: 10 }));
 const httpResponse = engine.queryResponse("local", JSON.stringify({ rank_by: ["id", "asc"], limit: 10 }));
 const storeJson = engine.exportStore();
