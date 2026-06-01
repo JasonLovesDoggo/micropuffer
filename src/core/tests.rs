@@ -1,8 +1,7 @@
 use crate::core::{
     DistanceMetric, Document, Micropuffer, MiniStore, Namespace, PATCH_BY_FILTER_LIMIT,
-    ScalarEqKey, bm25_stats_build_count, default_created_at, default_encryption, id_key,
-    namespace_metadata, parse_fts_config, query_namespace, query_store,
-    reset_bm25_stats_build_count, tokenize, write_store,
+    ScalarEqKey, default_created_at, default_encryption, id_key, namespace_metadata,
+    parse_fts_config, query_namespace, query_store, tokenize, write_store,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Map, Number, Value, json};
@@ -204,7 +203,7 @@ fn filters_support_documented_fuzzy_options_token_arrays_and_null_comparisons() 
 }
 
 #[test]
-fn non_bm25_rank_plans_do_not_build_bm25_stats() {
+fn non_bm25_rank_plans_execute_without_fts_indexes() {
     let namespace = namespace();
     let non_bm25_queries = [
         json!({
@@ -230,16 +229,12 @@ fn non_bm25_rank_plans_do_not_build_bm25_stats() {
     ];
 
     for query in non_bm25_queries {
-        reset_bm25_stats_build_count();
         query_namespace(&namespace, &query).unwrap();
-        assert_eq!(bm25_stats_build_count(), 0, "query: {query}");
     }
 }
 
 #[test]
 fn bm25_and_rank_operators_score_higher_matches_first() {
-    reset_bm25_stats_build_count();
-
     let response = query_namespace(
         &namespace(),
         &json!({
@@ -257,7 +252,6 @@ fn bm25_and_rank_operators_score_higher_matches_first() {
     assert!(
         response_rows[0]["$dist"].as_f64().unwrap() > response_rows[1]["$dist"].as_f64().unwrap()
     );
-    assert_eq!(bm25_stats_build_count(), 1);
 
     let token_array = query_namespace(
         &namespace(),
@@ -268,7 +262,90 @@ fn bm25_and_rank_operators_score_higher_matches_first() {
     )
     .unwrap();
     assert_eq!(rows(&token_array)[0]["id"], 3);
-    assert_eq!(bm25_stats_build_count(), 2);
+}
+
+#[test]
+fn nested_bm25_rank_operators_use_indexed_scores() {
+    let namespace: Namespace = serde_json::from_value(json!({
+        "name": "nested-bm25",
+        "schema": {
+            "text": {"type": "string", "full_text_search": true},
+            "title": {"type": "string", "full_text_search": true}
+        },
+        "documents": [
+            {"id": 1, "title": "walrus guide", "text": "walrus walrus arctic mammal", "boost": 1},
+            {"id": 2, "title": "reef notes", "text": "reef coral fish", "boost": 100},
+            {"id": 3, "title": "arctic field report", "text": "arctic mammal migration", "boost": 2}
+        ]
+    }))
+    .unwrap();
+
+    let product = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["Product", 2, ["text", "BM25", "walrus arctic"]],
+            "limit": 3
+        }),
+    )
+    .unwrap();
+    assert_eq!(rows(&product)[0]["id"], 1);
+
+    let sum = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["Sum", [
+                ["text", "BM25", "walrus"],
+                ["title", "BM25", "field"]
+            ]],
+            "limit": 3
+        }),
+    )
+    .unwrap();
+    assert_eq!(rows(&sum)[0]["id"], 1);
+    assert_eq!(rows(&sum)[1]["id"], 3);
+
+    let max = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["Max",
+                ["text", "BM25", "reef"],
+                ["title", "BM25", "guide"]
+            ],
+            "limit": 3
+        }),
+    )
+    .unwrap();
+    assert_eq!(rows(&max)[0]["id"], 1);
+    assert_eq!(rows(&max)[1]["id"], 2);
+
+    let saturate = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["Saturate", ["text", "BM25", "walrus"], {"midpoint": 0.1}],
+            "limit": 3
+        }),
+    )
+    .unwrap();
+    assert_eq!(rows(&saturate)[0]["id"], 1);
+
+    let simple = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["text", "BM25", "walrus arctic"],
+            "limit": 1
+        }),
+    )
+    .unwrap();
+    let origin = rows(&simple)[0]["$dist"].as_f64().unwrap();
+    let decay = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["Decay", ["Dist", ["text", "BM25", "walrus arctic"], origin], {"midpoint": 0.01}],
+            "limit": 3
+        }),
+    )
+    .unwrap();
+    assert_eq!(rows(&decay)[0]["id"], 1);
 }
 
 #[test]
@@ -519,6 +596,87 @@ fn fts_schema_options_affect_bm25_and_token_filters() {
 }
 
 #[test]
+fn indexed_bm25_updates_after_writes_and_supports_prefix_queries() {
+    let mut clone = Micropuffer::new();
+    clone
+        .write(
+            "fts-index",
+            &json!({
+                "schema": {
+                    "text": {
+                        "type": "string",
+                        "full_text_search": true
+                    }
+                },
+                "upsert_rows": [
+                    {"id": 1, "text": "walrus arctic mammal"},
+                    {"id": 2, "text": "reef coral fish"}
+                ]
+            }),
+        )
+        .unwrap();
+
+    let first = clone
+        .query(
+            "fts-index",
+            &json!({
+                "rank_by": ["text", "BM25", "walrus"],
+                "limit": 10
+            }),
+        )
+        .unwrap();
+    assert_eq!(rows(&first)[0]["id"], 1);
+
+    clone
+        .write(
+            "fts-index",
+            &json!({
+                "patch_rows": [
+                    {"id": 1, "text": "reef coral fish"},
+                    {"id": 2, "text": "walrus arctic mammal"}
+                ]
+            }),
+        )
+        .unwrap();
+
+    let updated = clone
+        .query(
+            "fts-index",
+            &json!({
+                "rank_by": ["text", "BM25", "walrus"],
+                "limit": 10
+            }),
+        )
+        .unwrap();
+    assert_eq!(rows(&updated)[0]["id"], 2);
+
+    let prefix = clone
+        .query(
+            "fts-index",
+            &json!({
+                "rank_by": ["Product", 2, ["text", "BM25", "arct", {"last_as_prefix": true}]],
+                "limit": 10
+            }),
+        )
+        .unwrap();
+    assert_eq!(rows(&prefix)[0]["id"], 2);
+
+    let nested_after_write = clone
+        .query(
+            "fts-index",
+            &json!({
+                "rank_by": ["Sum", [
+                    ["text", "BM25", "walrus"],
+                    ["text", "BM25", "arctic"]
+                ]],
+                "limit": 10
+            }),
+        )
+        .unwrap();
+    assert_eq!(rows(&nested_after_write)[0]["id"], 2);
+}
+
+#[test]
 fn aggregates_and_grouped_aggregates_apply_filters() {
     let response = query_namespace(
         &namespace(),
@@ -583,6 +741,203 @@ fn base64_vector_encoding_applies_to_included_vectors() {
 }
 
 #[test]
+fn vector_attributes_remain_visible_to_generic_filters() {
+    let cases = [
+        (json!(["vector", "Eq", [1.0, 1.0]]), vec![2]),
+        (json!(["vector", "NotEq", [0.0, 0.0]]), vec![2, 3]),
+        (
+            json!(["vector", "In", [[0.0, 0.0], [1.0, 1.0]]]),
+            vec![1, 2],
+        ),
+        (
+            json!(["vector", "NotIn", [[0.0, 0.0], [2.0, 2.0]]]),
+            vec![2],
+        ),
+        (json!(["vector", "Contains", 1.0]), vec![2]),
+        (json!(["vector", "NotContains", 9.0]), vec![1, 2, 3]),
+        (json!(["vector", "ContainsAny", [9.0, 1.0]]), vec![2]),
+        (
+            json!(["vector", "NotContainsAny", [9.0, 8.0]]),
+            vec![1, 2, 3],
+        ),
+    ];
+
+    for (filter, expected_ids) in cases {
+        let response = query_namespace(
+            &namespace(),
+            &json!({
+                "rank_by": ["id", "asc"],
+                "filters": filter,
+                "limit": 10,
+                "include_attributes": ["vector"]
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            rows(&response)
+                .iter()
+                .map(|row| row["id"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            expected_ids
+        );
+        for row in rows(&response) {
+            assert!(row.get("vector").is_some());
+        }
+    }
+}
+
+#[test]
+fn vector_attributes_remain_visible_to_write_conditions() {
+    let mut clone = Micropuffer::new();
+    clone
+        .write(
+            "vector-conditions",
+            &json!({
+                "upsert_rows": [
+                    {"id": 1, "vector": [1.0, 0.0], "title": "original"},
+                    {"id": 2, "vector": [2.0, 0.0], "title": "delete-me"}
+                ]
+            }),
+        )
+        .unwrap();
+
+    let blocked_same_vector = clone
+        .write(
+            "vector-conditions",
+            &json!({
+                "upsert_rows": [
+                    {"id": 1, "vector": [1.0, 0.0], "title": "should not update"}
+                ],
+                "upsert_condition": ["vector", "NotEq", {"$ref_new": "vector"}]
+            }),
+        )
+        .unwrap();
+    assert_eq!(blocked_same_vector["rows_affected"], 0);
+
+    let changed_vector = clone
+        .write(
+            "vector-conditions",
+            &json!({
+                "upsert_rows": [
+                    {"id": 1, "vector": [0.0, 1.0], "title": "updated"}
+                ],
+                "upsert_condition": ["vector", "NotEq", {"$ref_new": "vector"}]
+            }),
+        )
+        .unwrap();
+    assert_eq!(changed_vector["rows_affected"], 1);
+
+    let deleted = clone
+        .write(
+            "vector-conditions",
+            &json!({
+                "deletes": [2],
+                "delete_condition": ["vector", "Eq", [2.0, 0.0]]
+            }),
+        )
+        .unwrap();
+    assert_eq!(deleted["rows_affected"], 1);
+
+    let response = clone
+        .query(
+            "vector-conditions",
+            &json!({
+                "rank_by": ["id", "asc"],
+                "limit": 10,
+                "include_attributes": true
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        rows(&response),
+        &[json!({"id": 1, "vector": [0.0, 1.0], "title": "updated"})]
+    );
+}
+
+#[test]
+fn vector_projection_export_and_roundtrip_keep_base64_and_typed_cache() {
+    let mut clone = Micropuffer::new();
+    clone
+        .write(
+            "vector-projection",
+            &json!({
+                "upsert_rows": [
+                    {"id": 1, "vector": [1.0, 0.0], "title": "one"},
+                    {"id": 2, "vector": [0.0, 1.0], "title": "two"}
+                ]
+            }),
+        )
+        .unwrap();
+    let expected_vector = STANDARD.encode([1.0_f32.to_le_bytes(), 0.0_f32.to_le_bytes()].concat());
+
+    let query_include = clone
+        .query(
+            "vector-projection",
+            &json!({
+                "rank_by": ["vector", "ANN", [1.0, 0.0]],
+                "limit": 1,
+                "include_attributes": ["vector", "title"],
+                "vector_encoding": "base64"
+            }),
+        )
+        .unwrap();
+    assert_eq!(rows(&query_include)[0]["vector"], expected_vector);
+    assert_eq!(rows(&query_include)[0]["title"], "one");
+
+    let query_exclude = clone
+        .query(
+            "vector-projection",
+            &json!({
+                "rank_by": ["id", "asc"],
+                "limit": 1,
+                "exclude_attributes": ["title"],
+                "vector_encoding": "base64"
+            }),
+        )
+        .unwrap();
+    assert_eq!(rows(&query_exclude)[0]["vector"], expected_vector);
+    assert!(rows(&query_exclude)[0].get("title").is_none());
+
+    let export = clone
+        .export_namespace(
+            "vector-projection",
+            &json!({
+                "filters": ["vector", "Eq", [1.0, 0.0]],
+                "include_attributes": ["vector"],
+                "limit": 10,
+                "vector_encoding": "base64"
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        rows(&export),
+        &[json!({"id": 1, "vector": expected_vector})]
+    );
+
+    let serialized = serde_json::to_value(clone.store()).unwrap();
+    let imported: MiniStore = serde_json::from_value(serialized).unwrap();
+    let imported_doc = &imported.namespace("vector-projection").unwrap().documents[0];
+    assert_eq!(imported_doc.attributes["vector"], json!([1.0, 0.0]));
+    assert_eq!(
+        imported_doc.typed.dense_vector("vector").unwrap(),
+        &[1.0, 0.0]
+    );
+    assert_eq!(
+        query_store(
+            &imported,
+            "vector-projection",
+            &json!({
+                "rank_by": ["vector", "ANN", [1.0, 0.0]],
+                "limit": 1,
+                "include_attributes": ["title"]
+            }),
+        )
+        .unwrap()["rows"][0]["id"],
+        1
+    );
+}
+
+#[test]
 fn query_store_finds_namespace_by_name() {
     let store = MiniStore {
         namespaces: vec![namespace()],
@@ -604,6 +959,88 @@ fn documents_flatten_unknown_attributes() {
     let document: Document = serde_json::from_value(json!({"id": "a", "custom": 42})).unwrap();
     assert_eq!(document.id, "a");
     assert_eq!(document.attributes["custom"], 42);
+}
+
+#[test]
+fn document_typed_dense_vectors_are_cached_as_a_sidecar() {
+    let document: Document = serde_json::from_value(json!({
+        "id": "typed",
+        "vector": [1.0, 2.0, 3.0],
+        "sparse_vector": {"a": 0.5, "b": 1.5},
+        "score": 7
+    }))
+    .unwrap();
+
+    assert_eq!(
+        document.typed.dense_vector("vector").unwrap(),
+        &[1.0, 2.0, 3.0]
+    );
+    assert_eq!(document.attributes["vector"], json!([1.0, 2.0, 3.0]));
+
+    let serialized = serde_json::to_value(&document).unwrap();
+    assert_eq!(serialized["vector"], json!([1.0, 2.0, 3.0]));
+    assert_eq!(serialized["sparse_vector"], json!({"a": 0.5, "b": 1.5}));
+    assert!(serialized.get("typed").is_none());
+}
+
+#[test]
+fn typed_dense_vectors_refresh_on_upsert_and_imported_stores() {
+    let mut clone = Micropuffer::new();
+    clone
+        .write(
+            "typed-refresh",
+            &json!({
+                "schema": {
+                    "vector": "[2]f32",
+                    "sparse_vector": {
+                        "type": "{}f16",
+                        "sparse_knn": {"distance_metric": "dot_product"}
+                    },
+                    "score": "uint"
+                },
+                "upsert_rows": [
+                    {"id": 1, "vector": [1.0, 0.0], "sparse_vector": {"a": 0.1}, "score": 1}
+                ]
+            }),
+        )
+        .unwrap();
+    clone
+        .write(
+            "typed-refresh",
+            &json!({
+                "upsert_rows": [
+                    {"id": 1, "vector": [0.0, 1.0], "sparse_vector": {"a": 2.0, "b": 3.0}, "score": 9}
+                ]
+            }),
+        )
+        .unwrap();
+
+    let namespace = clone.store().namespace("typed-refresh").unwrap();
+    let document = &namespace.documents[0];
+    assert_eq!(document.typed.dense_vector("vector").unwrap(), &[0.0, 1.0]);
+
+    let serialized = serde_json::to_value(clone.store()).unwrap();
+    let imported: MiniStore = serde_json::from_value(serialized).unwrap();
+    let imported_doc = &imported.namespace("typed-refresh").unwrap().documents[0];
+    assert_eq!(
+        imported_doc
+            .typed
+            .dense_vector("vector")
+            .expect("cached imported vector"),
+        &[0.0, 1.0]
+    );
+    assert_eq!(
+        query_store(
+            &imported,
+            "typed-refresh",
+            &json!({
+                "rank_by": ["vector", "ANN", [0.0, 1.0]],
+                "limit": 1
+            }),
+        )
+        .unwrap()["rows"][0]["id"],
+        1
+    );
 }
 
 #[test]
@@ -1396,13 +1833,13 @@ fn copy_replaces_existing_empty_namespace_logical_bytes_cache() {
 fn patch_by_filter_respects_partial_limit_and_rows_remaining() {
     let mut documents = Vec::with_capacity(PATCH_BY_FILTER_LIMIT + 1);
     for index in 0..=PATCH_BY_FILTER_LIMIT {
-        documents.push(Document {
-            id: Value::Number(Number::from(index as u64)),
-            attributes: Map::from_iter([
+        documents.push(Document::new(
+            Value::Number(Number::from(index as u64)),
+            Map::from_iter([
                 ("group".to_string(), Value::String("all".to_string())),
                 ("patched".to_string(), Value::Bool(false)),
             ]),
-        });
+        ));
     }
     let mut clone = Micropuffer::from_store(MiniStore {
         namespaces: vec![Namespace {
@@ -1421,6 +1858,7 @@ fn patch_by_filter_respects_partial_limit_and_rows_remaining() {
             documents,
             query_indexes: Default::default(),
             logical_bytes_cache: Default::default(),
+            fts_index_cache: Default::default(),
         }],
     });
     let too_many = clone
@@ -1930,5 +2368,156 @@ fn write_100k_new_upserts_completes_in_one_batch() {
     assert_eq!(
         store.namespace("bulk-upsert").unwrap().documents.len(),
         100_000
+    );
+}
+
+#[test]
+#[ignore = "performance evidence; run explicitly"]
+fn stateful_100k_dense_sparse_query_benchmark() {
+    let row_count = benchmark_env_usize("MICROPUFFER_BENCH_ROWS").unwrap_or(100_000);
+    let dimensions = benchmark_env_usize("MICROPUFFER_BENCH_DIMS").unwrap_or(32);
+    let runs = benchmark_env_usize("MICROPUFFER_BENCH_QUERY_RUNS").unwrap_or(5);
+    let rows = (0..row_count)
+        .map(|index| {
+            json!({
+                "id": index as u64,
+                "vector": benchmark_vector(index, dimensions),
+                "sparse_vector": {
+                    format!("{}", index % 128): ((index % 10) + 1) as f64 / 10.0,
+                    format!("{}", (index * 7) % 128): ((index % 7) + 1) as f64 / 10.0
+                },
+                "category": format!("category_{}", index % 10),
+                "score": index % 1_000
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut clone = Micropuffer::new();
+    let write_started = std::time::Instant::now();
+    clone
+        .write(
+            "stateful-100k",
+            &json!({
+                "schema": {
+                    "vector": format!("[{dimensions}]f32"),
+                    "sparse_vector": {
+                        "type": "{}f16",
+                        "sparse_knn": {"distance_metric": "dot_product"}
+                    },
+                    "category": "string",
+                    "score": "uint"
+                },
+                "upsert_rows": rows
+            }),
+        )
+        .unwrap();
+    let write_elapsed = write_started.elapsed();
+
+    let dense_query = json!({
+        "rank_by": ["vector", "ANN", benchmark_vector(42, dimensions)],
+        "limit": 10,
+        "include_attributes": ["category", "score"]
+    });
+    let sparse_query = json!({
+        "rank_by": ["sparse_vector", "SparseKNN", {"7": 0.7, "12": 0.2}],
+        "limit": 10,
+        "include_attributes": ["category"]
+    });
+    let dense_elapsed = benchmark_query_runs(&clone, "stateful-100k", &dense_query, runs);
+    let sparse_elapsed = benchmark_query_runs(&clone, "stateful-100k", &sparse_query, runs);
+
+    println!(
+        "stateful_100k_dense_sparse_query_benchmark rows={row_count} dimensions={dimensions} runs={runs} write_ms={:.2} dense_total_ms={:.2} dense_mean_ms={:.2} sparse_total_ms={:.2} sparse_mean_ms={:.2}",
+        write_elapsed.as_secs_f64() * 1_000.0,
+        dense_elapsed.as_secs_f64() * 1_000.0,
+        dense_elapsed.as_secs_f64() * 1_000.0 / runs as f64,
+        sparse_elapsed.as_secs_f64() * 1_000.0,
+        sparse_elapsed.as_secs_f64() * 1_000.0 / runs as f64
+    );
+}
+
+fn benchmark_query_runs(
+    clone: &Micropuffer,
+    namespace_name: &str,
+    query: &Value,
+    runs: usize,
+) -> std::time::Duration {
+    let started = std::time::Instant::now();
+    for _ in 0..runs {
+        std::hint::black_box(clone.query(namespace_name, query).unwrap());
+    }
+    started.elapsed()
+}
+
+fn benchmark_env_usize(key: &str) -> Option<usize> {
+    std::env::var(key).ok()?.parse().ok()
+}
+
+fn benchmark_vector(seed: usize, dimensions: usize) -> Vec<f64> {
+    let mut values = (0..dimensions)
+        .map(|index| {
+            let raw = ((seed * 31 + index * 17) % 1_000) as f64 / 1_000.0;
+            raw * 2.0 - 1.0
+        })
+        .collect::<Vec<_>>();
+    let norm = values.iter().map(|value| value * value).sum::<f64>().sqrt();
+    for value in &mut values {
+        *value /= norm;
+    }
+    values
+}
+
+#[test]
+#[ignore = "performance evidence; run explicitly"]
+fn bm25_100k_indexed_query_benchmark() {
+    let text_buckets = [
+        "walrus arctic mammal",
+        "reef coral fish",
+        "falcon sky bird",
+        "forest fox mammal",
+    ];
+    let rows = (1..=100_000_u64)
+        .map(|id| {
+            json!({
+                "id": id,
+                "text": format!("{} document {id}", text_buckets[id as usize % text_buckets.len()]),
+                "category": format!("category_{}", id % 10)
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut store = MiniStore::default();
+    write_store(
+        &mut store,
+        "bm25-bench",
+        &json!({
+            "schema": {
+                "text": {
+                    "type": "string",
+                    "full_text_search": true
+                }
+            },
+            "upsert_rows": rows
+        }),
+    )
+    .unwrap();
+    let request = json!({
+        "rank_by": ["text", "BM25", "walrus mammal"],
+        "limit": 10
+    });
+
+    let cold_started = std::time::Instant::now();
+    query_store(&store, "bm25-bench", &request).unwrap();
+    let cold_elapsed = cold_started.elapsed();
+
+    let warm_runs = 10;
+    let warm_started = std::time::Instant::now();
+    for _ in 0..warm_runs {
+        std::hint::black_box(query_store(&store, "bm25-bench", &request).unwrap());
+    }
+    let warm_elapsed = warm_started.elapsed();
+    println!(
+        "bm25_100k_indexed_query_benchmark cold_ms={:.3} warm_runs={warm_runs} warm_total_ms={:.3} warm_mean_ms={:.3}",
+        cold_elapsed.as_secs_f64() * 1_000.0,
+        warm_elapsed.as_secs_f64() * 1_000.0,
+        warm_elapsed.as_secs_f64() * 1_000.0 / warm_runs as f64
     );
 }

@@ -5,6 +5,7 @@ use deunicode::deunicode;
 use globset::GlobBuilder;
 use regex::Regex;
 use rust_stemmers::{Algorithm, Stemmer};
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value, json};
 use std::cmp::Ordering;
@@ -187,11 +188,22 @@ pub struct Namespace {
     query_indexes: NamespaceQueryIndexCache,
     #[serde(skip)]
     logical_bytes_cache: NamespaceLogicalBytesCache,
+    #[serde(skip)]
+    fts_index_cache: NamespaceFtsIndexCache,
 }
 
 impl Namespace {
     fn invalidate_logical_bytes(&self) {
         self.logical_bytes_cache.clear();
+    }
+
+    fn invalidate_fts_indexes(&self) {
+        self.fts_index_cache.clear();
+    }
+
+    fn invalidate_query_caches(&self) {
+        self.invalidate_logical_bytes();
+        self.invalidate_fts_indexes();
     }
 
     fn set_cached_logical_bytes(&self, bytes: usize) {
@@ -206,6 +218,30 @@ impl Namespace {
     #[cfg(test)]
     fn has_cached_logical_bytes(&self) -> bool {
         self.logical_bytes_cache.get().is_some()
+    }
+}
+
+#[derive(Debug, Default)]
+struct NamespaceFtsIndexCache {
+    fields: Mutex<HashMap<String, FtsFieldIndex>>,
+}
+
+impl Clone for NamespaceFtsIndexCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl NamespaceFtsIndexCache {
+    fn clear(&self) {
+        self.fields_guard().clear();
+    }
+
+    fn fields_guard(&self) -> MutexGuard<'_, HashMap<String, FtsFieldIndex>> {
+        match self.fields.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 }
 
@@ -294,11 +330,98 @@ impl DistanceMetric {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone)]
 pub struct Document {
     pub id: Value,
-    #[serde(flatten)]
     pub attributes: Map<String, Value>,
+    pub typed: TypedDocumentFields,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TypedDocumentFields {
+    vector: Option<Vec<f64>>,
+}
+
+impl Document {
+    pub fn new(id: Value, attributes: Map<String, Value>) -> Self {
+        let typed = TypedDocumentFields::from_attributes(&attributes);
+        Self {
+            id,
+            attributes,
+            typed,
+        }
+    }
+
+    fn set_attribute(&mut self, key: String, value: Value) {
+        self.typed.set_attribute(&key, &value);
+        self.attributes.insert(key, value);
+    }
+}
+
+impl Serialize for Document {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut len = self.attributes.len() + 1;
+        if self.typed.vector.is_some() && !self.attributes.contains_key("vector") {
+            len += 1;
+        }
+        let mut map = serializer.serialize_map(Some(len))?;
+        map.serialize_entry("id", &self.id)?;
+        if let Some(vector) = &self.typed.vector
+            && !self.attributes.contains_key("vector")
+        {
+            map.serialize_entry("vector", vector)?;
+        }
+        for (key, value) in &self.attributes {
+            map.serialize_entry(key, value)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Document {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct DocumentWire {
+            id: Value,
+            #[serde(flatten)]
+            attributes: Map<String, Value>,
+        }
+
+        let wire = DocumentWire::deserialize(deserializer)?;
+        Ok(Document::new(wire.id, wire.attributes))
+    }
+}
+
+impl TypedDocumentFields {
+    fn from_attributes(attributes: &Map<String, Value>) -> Self {
+        let mut typed = Self::default();
+        for (key, value) in attributes {
+            typed.set_attribute(key, value);
+        }
+        typed
+    }
+
+    fn set_attribute(&mut self, key: &str, value: &Value) {
+        if key == "vector" {
+            self.vector = None;
+            if let Some(vector) = dense_vector_from_value(value) {
+                self.vector = Some(vector);
+            }
+        }
+    }
+
+    fn dense_vector(&self, key: &str) -> Option<&[f64]> {
+        if key == "vector" {
+            return self.vector.as_deref();
+        }
+        None
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -415,7 +538,6 @@ struct PerLimit {
 struct RankPlan<'a> {
     rank_by: &'a Value,
     kind: RankKind,
-    contains_bm25: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -452,13 +574,15 @@ enum PreparedRankExpr<'a> {
         attribute: &'a str,
         query: PreparedDenseQuery,
     },
+    DenseDistanceVector {
+        query: PreparedDenseQuery,
+    },
     SparseDotProduct {
         attribute: &'a str,
         query: HashMap<String, f64>,
     },
     Bm25 {
-        field: &'a str,
-        query: Option<PreparedBm25Query>,
+        scores: PreparedBm25Scores,
     },
     Filter(&'a Value),
 }
@@ -488,16 +612,89 @@ struct PreparedBm25Term {
 }
 
 #[derive(Debug, Clone)]
-struct Bm25FieldStats {
+struct PreparedBm25Scores {
+    by_doc: HashMap<usize, f64>,
+    ranked: Vec<(usize, f64)>,
+}
+
+#[derive(Debug, Clone)]
+struct FtsFieldIndex {
     doc_count: usize,
     avg_len: f64,
     doc_freqs: HashMap<String, usize>,
+    doc_lengths: Vec<usize>,
+    postings: HashMap<String, Vec<FtsPosting>>,
     config: FtsConfig,
 }
 
 #[derive(Debug, Clone)]
-struct Bm25Stats {
-    fields: HashMap<String, Bm25FieldStats>,
+struct FtsPosting {
+    doc_index: usize,
+    term_frequency: usize,
+}
+
+impl PreparedBm25Scores {
+    fn new(ranked: Vec<(usize, f64)>) -> Self {
+        let by_doc = ranked.iter().copied().collect();
+        Self { by_doc, ranked }
+    }
+
+    fn score(&self, doc_index: usize) -> f64 {
+        self.by_doc.get(&doc_index).copied().unwrap_or(0.0)
+    }
+}
+
+impl FtsFieldIndex {
+    fn build(namespace: &Namespace, field: &str, config: FtsConfig) -> Self {
+        let mut postings_by_doc: HashMap<String, HashMap<usize, usize>> = HashMap::new();
+        let mut doc_lengths = vec![0; namespace.documents.len()];
+        let mut doc_count = 0usize;
+        let mut total_len = 0usize;
+
+        for (doc_index, document) in namespace.documents.iter().enumerate() {
+            let tokens = string_attr_tokens_with_config(document, field, &config);
+            if tokens.is_empty() {
+                continue;
+            }
+            doc_count += 1;
+            total_len += tokens.len();
+            doc_lengths[doc_index] = tokens.len();
+            for token in tokens {
+                let per_doc = postings_by_doc.entry(token).or_default();
+                let count = per_doc.entry(doc_index).or_insert(0);
+                *count += 1;
+            }
+        }
+
+        let mut postings = HashMap::with_capacity(postings_by_doc.len());
+        let mut doc_freqs = HashMap::with_capacity(postings_by_doc.len());
+        for (token, per_doc) in postings_by_doc {
+            doc_freqs.insert(token.clone(), per_doc.len());
+            let mut token_postings = per_doc
+                .into_iter()
+                .map(|(doc_index, term_frequency)| FtsPosting {
+                    doc_index,
+                    term_frequency,
+                })
+                .collect::<Vec<_>>();
+            token_postings.sort_by_key(|posting| posting.doc_index);
+            postings.insert(token, token_postings);
+        }
+
+        let avg_len = if doc_count == 0 {
+            0.0
+        } else {
+            total_len as f64 / doc_count as f64
+        };
+        Self {
+            doc_count,
+            avg_len,
+            doc_freqs,
+            doc_lengths,
+            postings,
+            config,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -645,6 +842,7 @@ pub fn update_namespace_schema(
         .namespace_mut(namespace_name)
         .ok_or_else(|| QueryError::new(format!("Namespace '{namespace_name}' was not found.")))?;
     merge_schema(namespace, schema)?;
+    namespace.invalidate_fts_indexes();
     namespace.updated_at = logical_now();
     namespace_schema(namespace)
 }
@@ -731,19 +929,19 @@ pub fn recall_namespace(namespace: &Namespace, request: &Value) -> Result<Value,
                 })
                 .unwrap_or(true)
         })
-        .filter(|document| document.attributes.get("vector").is_some())
+        .filter(|document| {
+            document.typed.vector.is_some() || document.attributes.get("vector").is_some()
+        })
         .collect::<Vec<_>>();
     let sample = candidates.iter().take(num).copied().collect::<Vec<_>>();
     let mut ground_truth = Vec::new();
     for query_document in &sample {
-        let query_vector = query_document
-            .attributes
-            .get("vector")
+        let query_vector = document_vector_value(query_document)
             .ok_or_else(|| QueryError::new("recall query document is missing vector."))?;
         let mut neighbors = candidates
             .iter()
             .map(|document| {
-                dense_distance(document, "vector", query_vector, namespace.distance_metric)
+                dense_distance(document, "vector", &query_vector, namespace.distance_metric)
                     .map(|score| (*document, score))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -778,10 +976,19 @@ fn project_recall_neighbor(document: &Document, score: f64) -> Value {
     let mut row = Map::new();
     row.insert("$dist".to_string(), number_value(score));
     row.insert("id".to_string(), document.id.clone());
-    if let Some(vector) = document.attributes.get("vector") {
-        row.insert("vector".to_string(), vector.clone());
+    if let Some(vector) = document_vector_value(document) {
+        row.insert("vector".to_string(), vector);
     }
     Value::Object(row)
+}
+
+fn document_vector_value(document: &Document) -> Option<Value> {
+    document
+        .typed
+        .vector
+        .as_ref()
+        .map(|vector| Value::Array(vector.iter().copied().map(number_value).collect()))
+        .or_else(|| document.attributes.get("vector").cloned())
 }
 
 pub fn explain_query(namespace: &Namespace, request: &Value) -> Result<Value, QueryError> {
@@ -859,6 +1066,7 @@ pub fn write_store(
             .namespace_mut(namespace_name)
             .ok_or_else(|| QueryError::new("namespace disappeared during write."))?;
         merge_schema(namespace, as_object(schema, "schema")?)?;
+        namespace.invalidate_fts_indexes();
         namespace.updated_at = logical_now();
     }
     if let Some(encryption) = request.get("encryption") {
@@ -950,7 +1158,7 @@ pub fn write_store(
         || !summary.patched_ids.is_empty()
         || !summary.deleted_ids.is_empty()
     {
-        namespace.invalidate_logical_bytes();
+        namespace.invalidate_query_caches();
         let now = logical_now();
         namespace.last_write_at = Some(now.clone());
         namespace.updated_at = now;
@@ -1019,8 +1227,7 @@ fn query_single(
     let limit = parse_limit(object)?;
     let filters = object.get("filters");
     let rank_plan = parse_rank_plan(rank_by, filters.is_some())?;
-    let bm25_stats = rank_plan.contains_bm25.then(|| Bm25Stats::new(namespace));
-    let prepared_rank_plan = prepare_rank_plan(rank_plan, bm25_stats.as_ref())?;
+    let prepared_rank_plan = prepare_rank_plan(rank_plan, namespace)?;
     let ranked = if limit.per.is_none() {
         indexed_order_ranked(namespace, &prepared_rank_plan.kind, filters, limit.total)?
     } else {
@@ -1029,8 +1236,7 @@ fn query_single(
     let ranked = match ranked {
         Some(ranked) => ranked,
         None => {
-            let ranked =
-                rank_documents(namespace, &prepared_rank_plan, filters, bm25_stats.as_ref())?;
+            let ranked = rank_documents(namespace, &prepared_rank_plan, filters)?;
             apply_limit(ranked, &limit, &prepared_rank_plan.kind)?
         }
     };
@@ -1137,6 +1343,7 @@ fn parse_pinning(value: &Value) -> Result<Option<Value>, QueryError> {
 fn inferred_schema(namespace: &Namespace) -> Map<String, Value> {
     let mut schema = namespace.schema.clone();
     for document in &namespace.documents {
+        infer_typed_document_schema(document, &mut schema);
         for (attribute, value) in &document.attributes {
             if schema.contains_key(attribute) {
                 continue;
@@ -1265,6 +1472,7 @@ fn merge_schema(namespace: &mut Namespace, schema: &Map<String, Value>) -> Resul
 fn refresh_inferred_schema(namespace: &mut Namespace) -> Result<(), QueryError> {
     let mut schema = namespace.schema.clone();
     for document in &namespace.documents {
+        infer_typed_document_schema(document, &mut schema);
         for (attribute, value) in &document.attributes {
             if schema.contains_key(attribute) {
                 continue;
@@ -1275,6 +1483,17 @@ fn refresh_inferred_schema(namespace: &mut Namespace) -> Result<(), QueryError> 
     validate_vector_column_count(&schema)?;
     namespace.schema = schema;
     Ok(())
+}
+
+fn infer_typed_document_schema(document: &Document, schema: &mut Map<String, Value>) {
+    if !schema.contains_key("vector")
+        && let Some(vector) = &document.typed.vector
+    {
+        schema.insert(
+            "vector".to_string(),
+            json!(format!("[{}]f32", vector.len())),
+        );
+    }
 }
 
 fn validate_write_rows_against_schema(
@@ -1963,6 +2182,7 @@ fn ensure_namespace(store: &mut MiniStore, namespace_name: &str) {
             documents: Vec::new(),
             query_indexes: NamespaceQueryIndexCache::default(),
             logical_bytes_cache: NamespaceLogicalBytesCache::default(),
+            fts_index_cache: NamespaceFtsIndexCache::default(),
         });
     }
 }
@@ -2006,6 +2226,7 @@ fn copy_namespace(
         destination.last_write_at = Some(logical_now());
         destination.documents = source.documents;
         destination.query_indexes.guard().clear();
+        destination.invalidate_fts_indexes();
         destination.set_cached_logical_bytes(bytes_written);
     } else {
         store.namespaces.push(Namespace {
@@ -2021,6 +2242,7 @@ fn copy_namespace(
             documents: source.documents,
             query_indexes: NamespaceQueryIndexCache::default(),
             logical_bytes_cache: NamespaceLogicalBytesCache::default(),
+            fts_index_cache: NamespaceFtsIndexCache::default(),
         });
         store
             .namespace_mut(destination_name)
@@ -2229,20 +2451,14 @@ fn upsert_document(
         }
         let previous = namespace.documents[index].clone();
         remove_document_from_cached_indexes(namespace, &previous);
-        namespace.documents[index] = Document {
-            id: row.id,
-            attributes: row.attributes,
-        };
+        namespace.documents[index] = Document::new(row.id, row.attributes);
         let updated = namespace.documents[index].clone();
         insert_document_into_cached_indexes(namespace, &updated);
     } else {
         let index = namespace.documents.len();
         let id = row.id;
         id_index.insert_new(&id, index);
-        namespace.documents.push(Document {
-            id,
-            attributes: row.attributes,
-        });
+        namespace.documents.push(Document::new(id, row.attributes));
         let inserted = namespace.documents[index].clone();
         insert_document_into_cached_indexes(namespace, &inserted);
     }
@@ -2268,7 +2484,7 @@ fn patch_document(
     let previous = namespace.documents[index].clone();
     remove_document_from_cached_indexes(namespace, &previous);
     for (key, value) in row.attributes {
-        namespace.documents[index].attributes.insert(key, value);
+        namespace.documents[index].set_attribute(key, value);
     }
     let updated = namespace.documents[index].clone();
     insert_document_into_cached_indexes(namespace, &updated);
@@ -2420,7 +2636,7 @@ fn patch_by_filter(
     for (index, document) in namespace.documents.iter_mut().enumerate() {
         if selected.contains(&index) {
             for (key, value) in patch {
-                document.attributes.insert(key.clone(), value.clone());
+                document.set_attribute(key.clone(), value.clone());
             }
             patched.push(document.id.clone());
         }
@@ -2480,76 +2696,6 @@ fn legacy_float_id_key(number: &Number) -> Option<String> {
     } else {
         None
     }
-}
-
-impl Bm25Stats {
-    fn new(namespace: &Namespace) -> Self {
-        #[cfg(test)]
-        BM25_STATS_BUILD_COUNT.with(|count| count.set(count.get() + 1));
-
-        let mut fields: BTreeSet<String> = BTreeSet::new();
-        for document in &namespace.documents {
-            for (field, value) in &document.attributes {
-                if value.is_string()
-                    || value
-                        .as_array()
-                        .is_some_and(|items| items.iter().all(Value::is_string))
-                {
-                    fields.insert(field.clone());
-                }
-            }
-        }
-        let mut stats = HashMap::new();
-        for field in fields {
-            let config = fts_config_for_field(namespace, &field);
-            let mut doc_freqs: HashMap<String, usize> = HashMap::new();
-            let mut total_len = 0usize;
-            let mut doc_count = 0usize;
-            for document in &namespace.documents {
-                let tokens = string_attr_tokens_with_config(document, &field, &config);
-                if tokens.is_empty() {
-                    continue;
-                }
-                doc_count += 1;
-                total_len += tokens.len();
-                let unique: BTreeSet<String> = tokens.into_iter().collect();
-                for token in unique {
-                    let count = doc_freqs.entry(token).or_insert(0);
-                    *count += 1;
-                }
-            }
-            let avg_len = if doc_count == 0 {
-                0.0
-            } else {
-                total_len as f64 / doc_count as f64
-            };
-            stats.insert(
-                field,
-                Bm25FieldStats {
-                    doc_count,
-                    avg_len,
-                    doc_freqs,
-                    config,
-                },
-            );
-        }
-        Self { fields: stats }
-    }
-}
-
-#[cfg(test)]
-thread_local! {
-    static BM25_STATS_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-fn reset_bm25_stats_build_count() {
-    BM25_STATS_BUILD_COUNT.with(|count| count.set(0));
-}
-
-#[cfg(test)]
-fn bm25_stats_build_count() -> usize {
-    BM25_STATS_BUILD_COUNT.with(std::cell::Cell::get)
 }
 
 fn validate_multi_query_root(object: &Map<String, Value>) -> Result<(), QueryError> {
@@ -2642,57 +2788,31 @@ fn clamp_limit(raw: u64, label: &str) -> Result<usize, QueryError> {
 
 fn parse_rank_plan<'a>(rank_by: &'a Value, has_filters: bool) -> Result<RankPlan<'a>, QueryError> {
     let array = as_array(rank_by, "rank_by")?;
-    let (kind, contains_bm25) = if !array.is_empty() && array.iter().all(Value::is_array) {
+    let kind = if !array.is_empty() && array.iter().all(Value::is_array) {
         let attributes = array
             .iter()
             .map(parse_attribute_order)
             .collect::<Result<Vec<_>, _>>()?;
-        (RankKind::MultiAttributeOrder { attributes }, false)
+        RankKind::MultiAttributeOrder { attributes }
     } else if array.len() == 2 {
         let attr = as_string(&array[0], "rank_by attribute")?;
         if array[1].as_str() == Some("asc") {
-            (
-                RankKind::AttributeOrder {
-                    attribute: attr.to_string(),
-                    direction: SortDirection::Asc,
-                },
-                false,
-            )
+            RankKind::AttributeOrder {
+                attribute: attr.to_string(),
+                direction: SortDirection::Asc,
+            }
         } else if array[1].as_str() == Some("desc") {
-            (
-                RankKind::AttributeOrder {
-                    attribute: attr.to_string(),
-                    direction: SortDirection::Desc,
-                },
-                false,
-            )
+            RankKind::AttributeOrder {
+                attribute: attr.to_string(),
+                direction: SortDirection::Desc,
+            }
         } else {
-            (
-                rank_expression_kind(rank_by, has_filters)?,
-                rank_expr_contains_bm25(rank_by),
-            )
+            rank_expression_kind(rank_by, has_filters)?
         }
     } else {
-        (
-            rank_expression_kind(rank_by, has_filters)?,
-            rank_expr_contains_bm25(rank_by),
-        )
+        rank_expression_kind(rank_by, has_filters)?
     };
-    Ok(RankPlan {
-        rank_by,
-        kind,
-        contains_bm25,
-    })
-}
-
-fn rank_expr_contains_bm25(expression: &Value) -> bool {
-    let Some(array) = expression.as_array() else {
-        return false;
-    };
-    if array.len() >= 3 && array.get(1).and_then(Value::as_str) == Some("BM25") {
-        return true;
-    }
-    array.iter().any(rank_expr_contains_bm25)
+    Ok(RankPlan { rank_by, kind })
 }
 
 fn parse_attribute_order(value: &Value) -> Result<(String, SortDirection), QueryError> {
@@ -2741,12 +2861,12 @@ fn rank_expression_kind(rank_by: &Value, has_filters: bool) -> Result<RankKind, 
 
 fn prepare_rank_plan<'a>(
     rank_plan: RankPlan<'a>,
-    bm25_stats: Option<&Bm25Stats>,
+    namespace: &Namespace,
 ) -> Result<PreparedRankPlan<'a>, QueryError> {
     let expression = match rank_plan.kind {
         RankKind::AttributeOrder { .. } | RankKind::MultiAttributeOrder { .. } => None,
         RankKind::SmallerIsBetter | RankKind::LargerIsBetter => {
-            Some(prepare_rank_expr(rank_plan.rank_by, bm25_stats)?)
+            Some(prepare_rank_expr(rank_plan.rank_by, namespace)?)
         }
     };
     Ok(PreparedRankPlan {
@@ -2757,7 +2877,7 @@ fn prepare_rank_plan<'a>(
 
 fn prepare_rank_expr<'a>(
     expression: &'a Value,
-    bm25_stats: Option<&Bm25Stats>,
+    namespace: &Namespace,
 ) -> Result<PreparedRankExpr<'a>, QueryError> {
     if let Some(number) = expression.as_f64() {
         return Ok(PreparedRankExpr::Literal(number));
@@ -2768,9 +2888,9 @@ fn prepare_rank_expr<'a>(
     }
     if let Some(op) = array[0].as_str() {
         match op {
-            "Sum" => return prepare_sum(array, bm25_stats),
-            "Max" => return prepare_max(array, bm25_stats),
-            "Product" => return prepare_product(array, bm25_stats),
+            "Sum" => return prepare_sum(array, namespace),
+            "Max" => return prepare_max(array, namespace),
+            "Product" => return prepare_product(array, namespace),
             "Attribute" => {
                 if array.len() != 2 {
                     return Err(QueryError::new("Attribute requires one attribute name."));
@@ -2780,9 +2900,9 @@ fn prepare_rank_expr<'a>(
                     "Attribute name",
                 )?));
             }
-            "Saturate" => return prepare_saturate(array, bm25_stats),
-            "Decay" => return prepare_decay(array, bm25_stats),
-            "Dist" => return prepare_dist(array, bm25_stats),
+            "Saturate" => return prepare_saturate(array, namespace),
+            "Decay" => return prepare_decay(array, namespace),
+            "Dist" => return prepare_dist(array, namespace),
             "And" | "Or" | "Not" => return Ok(PreparedRankExpr::Filter(expression)),
             _ => {}
         }
@@ -2794,19 +2914,26 @@ fn prepare_rank_expr<'a>(
             "ANN" | "kNN" => {
                 let values = numeric_array(&array[2], "query vector")?;
                 let norm = vector_norm(&values);
-                Ok(PreparedRankExpr::DenseDistance {
-                    attribute: attr,
-                    query: PreparedDenseQuery { values, norm },
-                })
+                let query = PreparedDenseQuery { values, norm };
+                if attr == "vector" {
+                    Ok(PreparedRankExpr::DenseDistanceVector { query })
+                } else {
+                    Ok(PreparedRankExpr::DenseDistance {
+                        attribute: attr,
+                        query,
+                    })
+                }
             }
             "SparseKNN" => Ok(PreparedRankExpr::SparseDotProduct {
                 attribute: attr,
                 query: sparse_map(&array[2], "query sparse vector")?,
             }),
-            "BM25" => Ok(PreparedRankExpr::Bm25 {
-                field: attr,
-                query: prepare_bm25_query(attr, &array[2], array.get(3), bm25_stats)?,
-            }),
+            "BM25" => {
+                let query = prepare_bm25_query(attr, &array[2], array.get(3), namespace)?;
+                Ok(PreparedRankExpr::Bm25 {
+                    scores: PreparedBm25Scores::new(score_indexed_bm25(namespace, attr, &query)),
+                })
+            }
             _ => Ok(PreparedRankExpr::Filter(expression)),
         };
     }
@@ -2815,21 +2942,21 @@ fn prepare_rank_expr<'a>(
 
 fn prepare_sum<'a>(
     array: &'a [Value],
-    bm25_stats: Option<&Bm25Stats>,
+    namespace: &Namespace,
 ) -> Result<PreparedRankExpr<'a>, QueryError> {
     let terms = array
         .get(1)
         .ok_or_else(|| QueryError::new("Sum requires terms."))?;
     let terms = as_array(terms, "Sum terms")?
         .iter()
-        .map(|term| prepare_rank_expr(term, bm25_stats))
+        .map(|term| prepare_rank_expr(term, namespace))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(PreparedRankExpr::Sum(terms))
 }
 
 fn prepare_max<'a>(
     array: &'a [Value],
-    bm25_stats: Option<&Bm25Stats>,
+    namespace: &Namespace,
 ) -> Result<PreparedRankExpr<'a>, QueryError> {
     let terms = if array.len() == 2 {
         as_array(&array[1], "Max terms")?.iter().collect::<Vec<_>>()
@@ -2839,14 +2966,14 @@ fn prepare_max<'a>(
     Ok(PreparedRankExpr::Max(
         terms
             .into_iter()
-            .map(|term| prepare_rank_expr(term, bm25_stats))
+            .map(|term| prepare_rank_expr(term, namespace))
             .collect::<Result<Vec<_>, _>>()?,
     ))
 }
 
 fn prepare_product<'a>(
     array: &'a [Value],
-    bm25_stats: Option<&Bm25Stats>,
+    namespace: &Namespace,
 ) -> Result<PreparedRankExpr<'a>, QueryError> {
     if array.len() != 3 {
         return Err(QueryError::new(
@@ -2861,20 +2988,20 @@ fn prepare_product<'a>(
     }
     Ok(PreparedRankExpr::Product {
         weight,
-        expression: Box::new(prepare_rank_expr(&array[2], bm25_stats)?),
+        expression: Box::new(prepare_rank_expr(&array[2], namespace)?),
     })
 }
 
 fn prepare_saturate<'a>(
     array: &'a [Value],
-    bm25_stats: Option<&Bm25Stats>,
+    namespace: &Namespace,
 ) -> Result<PreparedRankExpr<'a>, QueryError> {
     if array.len() < 2 {
         return Err(QueryError::new("Saturate requires an expression."));
     }
     let options = array.get(2).and_then(Value::as_object);
     Ok(PreparedRankExpr::Saturate {
-        expression: Box::new(prepare_rank_expr(&array[1], bm25_stats)?),
+        expression: Box::new(prepare_rank_expr(&array[1], namespace)?),
         midpoint: options
             .and_then(|object| object.get("midpoint"))
             .and_then(value_as_f64)
@@ -2888,14 +3015,14 @@ fn prepare_saturate<'a>(
 
 fn prepare_decay<'a>(
     array: &'a [Value],
-    bm25_stats: Option<&Bm25Stats>,
+    namespace: &Namespace,
 ) -> Result<PreparedRankExpr<'a>, QueryError> {
     if array.len() < 2 {
         return Err(QueryError::new("Decay requires an expression."));
     }
     let options = array.get(2).and_then(Value::as_object);
     Ok(PreparedRankExpr::Decay {
-        expression: Box::new(prepare_rank_expr(&array[1], bm25_stats)?),
+        expression: Box::new(prepare_rank_expr(&array[1], namespace)?),
         midpoint: options
             .and_then(|object| object.get("midpoint"))
             .map(parse_midpoint)
@@ -2910,7 +3037,7 @@ fn prepare_decay<'a>(
 
 fn prepare_dist<'a>(
     array: &'a [Value],
-    bm25_stats: Option<&Bm25Stats>,
+    namespace: &Namespace,
 ) -> Result<PreparedRankExpr<'a>, QueryError> {
     if array.len() != 3 {
         return Err(QueryError::new(
@@ -2925,10 +3052,10 @@ fn prepare_dist<'a>(
                 .ok_or_else(|| QueryError::new("Dist Attribute requires a name."))?;
             PreparedDistExpr::Attribute(attr)
         } else {
-            PreparedDistExpr::Rank(Box::new(prepare_rank_expr(&array[1], bm25_stats)?))
+            PreparedDistExpr::Rank(Box::new(prepare_rank_expr(&array[1], namespace)?))
         }
     } else {
-        PreparedDistExpr::Rank(Box::new(prepare_rank_expr(&array[1], bm25_stats)?))
+        PreparedDistExpr::Rank(Box::new(prepare_rank_expr(&array[1], namespace)?))
     };
     Ok(PreparedRankExpr::Dist {
         expression,
@@ -2940,16 +3067,12 @@ fn prepare_bm25_query(
     field: &str,
     query: &Value,
     options: Option<&Value>,
-    stats: Option<&Bm25Stats>,
-) -> Result<Option<PreparedBm25Query>, QueryError> {
-    let stats = stats.ok_or_else(|| QueryError::new("BM25 stats were not prepared."))?;
-    let field_stats = match stats.fields.get(field) {
-        Some(stats) if stats.doc_count > 0 && stats.avg_len > 0.0 => stats,
-        _ => return Ok(None),
-    };
-    let query_tokens = query_tokens_with_config(query, "BM25 query", &field_stats.config)?;
+    namespace: &Namespace,
+) -> Result<PreparedBm25Query, QueryError> {
+    let config = fts_config_for_field(namespace, field);
+    let query_tokens = query_tokens_with_config(query, "BM25 query", &config)?;
     if query_tokens.is_empty() {
-        return Ok(Some(PreparedBm25Query { terms: Vec::new() }));
+        return Ok(PreparedBm25Query { terms: Vec::new() });
     }
     let last_as_prefix = options
         .and_then(Value::as_object)
@@ -2972,15 +3095,18 @@ fn prepare_bm25_query(
             prefix: last_as_prefix && index + 1 == query_tokens.len(),
         });
     }
-    Ok(Some(PreparedBm25Query { terms }))
+    Ok(PreparedBm25Query { terms })
 }
 
 fn rank_documents<'a>(
     namespace: &'a Namespace,
     rank_plan: &PreparedRankPlan<'_>,
     filters: Option<&Value>,
-    bm25_stats: Option<&Bm25Stats>,
 ) -> Result<Vec<RankedDocument<'a>>, QueryError> {
+    if let Some(scores) = simple_bm25_scores(rank_plan) {
+        return rank_indexed_bm25_documents(namespace, scores, filters);
+    }
+
     let mut ranked = Vec::new();
     let indexed_candidates = filters
         .map(|filter| indexed_filter_candidates(namespace, filter))
@@ -2990,10 +3116,10 @@ fn rank_documents<'a>(
         .as_deref()
         .map(CandidateIndexes::Indexed)
         .unwrap_or_else(|| CandidateIndexes::All(0..namespace.documents.len()));
-    for index in candidate_indexes {
+    for doc_index in candidate_indexes {
         let document = namespace
             .documents
-            .get(index)
+            .get(doc_index)
             .ok_or_else(|| QueryError::new("query index referenced a missing document."))?;
         if !filters
             .map(|filter| eval_filter_with_schema(document, filter, Some(&namespace.schema)))
@@ -3005,12 +3131,12 @@ fn rank_documents<'a>(
         let score = match rank_plan.kind {
             RankKind::AttributeOrder { .. } | RankKind::MultiAttributeOrder { .. } => 0.0,
             RankKind::SmallerIsBetter | RankKind::LargerIsBetter => eval_prepared_rank_expr(
+                doc_index,
                 document,
                 rank_plan
                     .expression
                     .as_ref()
                     .ok_or_else(|| QueryError::new("rank expression was not prepared."))?,
-                bm25_stats,
                 namespace.distance_metric,
             )?,
         };
@@ -3026,6 +3152,41 @@ fn rank_documents<'a>(
                 score,
             });
         }
+    }
+    Ok(ranked)
+}
+
+fn simple_bm25_scores<'a>(rank_plan: &'a PreparedRankPlan<'_>) -> Option<&'a PreparedBm25Scores> {
+    if !matches!(rank_plan.kind, RankKind::LargerIsBetter) {
+        return None;
+    }
+    match rank_plan.expression.as_ref()? {
+        PreparedRankExpr::Bm25 { scores } => Some(scores),
+        _ => None,
+    }
+}
+
+fn rank_indexed_bm25_documents<'a>(
+    namespace: &'a Namespace,
+    scores: &PreparedBm25Scores,
+    filters: Option<&Value>,
+) -> Result<Vec<RankedDocument<'a>>, QueryError> {
+    let mut ranked = Vec::with_capacity(scores.ranked.len());
+    for (doc_index, score) in scores.ranked.iter().copied() {
+        let Some(document) = namespace.documents.get(doc_index) else {
+            continue;
+        };
+        if !filters
+            .map(|filter| eval_filter_with_schema(document, filter, Some(&namespace.schema)))
+            .transpose()?
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        ranked.push(RankedDocument {
+            doc: document,
+            score,
+        });
     }
     Ok(ranked)
 }
@@ -3079,6 +3240,9 @@ fn indexed_order_ranked<'a>(
         .flatten();
     if filters.is_some() && filter_candidates.is_none() {
         return Ok(None);
+    }
+    if filter_candidates.as_ref().is_some_and(Vec::is_empty) {
+        return Ok(Some(Vec::new()));
     }
     let order = order_index(namespace, &order_key);
     let mut ranked = Vec::with_capacity(limit.min(order.len()));
@@ -3427,6 +3591,99 @@ fn sorted_union(left: &[usize], right: &[usize]) -> Vec<usize> {
     output
 }
 
+fn score_indexed_bm25(
+    namespace: &Namespace,
+    field: &str,
+    query: &PreparedBm25Query,
+) -> Vec<(usize, f64)> {
+    let config = fts_config_for_field(namespace, field);
+    let mut indexes = namespace.fts_index_cache.fields_guard();
+    let rebuild = indexes
+        .get(field)
+        .map(|index| index.config != config)
+        .unwrap_or(true);
+    if rebuild {
+        indexes.insert(
+            field.to_string(),
+            FtsFieldIndex::build(namespace, field, config),
+        );
+    }
+    let Some(index) = indexes.get(field) else {
+        return Vec::new();
+    };
+    score_bm25_index(index, query)
+}
+
+fn score_bm25_index(index: &FtsFieldIndex, query: &PreparedBm25Query) -> Vec<(usize, f64)> {
+    if index.doc_count == 0 || index.avg_len <= 0.0 {
+        return Vec::new();
+    }
+    let mut scores: HashMap<usize, f64> = HashMap::new();
+    for term in &query.terms {
+        if term.prefix {
+            let mut seen_docs = BTreeSet::new();
+            for (token, postings) in &index.postings {
+                if !token.starts_with(&term.token) {
+                    continue;
+                }
+                for posting in postings {
+                    if seen_docs.insert(posting.doc_index) {
+                        let score = scores.entry(posting.doc_index).or_insert(0.0);
+                        *score += 1.0;
+                    }
+                }
+            }
+            continue;
+        }
+        let Some(postings) = index.postings.get(&term.token) else {
+            continue;
+        };
+        let doc_freq = index.doc_freqs.get(&term.token).copied().unwrap_or(0);
+        if doc_freq == 0 {
+            continue;
+        }
+        for posting in postings {
+            let Some(doc_len) = index.doc_lengths.get(posting.doc_index).copied() else {
+                continue;
+            };
+            if doc_len == 0 {
+                continue;
+            }
+            let score = scores.entry(posting.doc_index).or_insert(0.0);
+            *score += bm25_term_score(
+                index,
+                doc_freq,
+                posting.term_frequency,
+                doc_len,
+                term.query_frequency,
+            );
+        }
+    }
+    scores
+        .into_iter()
+        .filter(|(_, score)| *score != 0.0)
+        .collect()
+}
+
+fn bm25_term_score(
+    index: &FtsFieldIndex,
+    doc_freq: usize,
+    term_frequency: usize,
+    doc_len: usize,
+    query_frequency: usize,
+) -> f64 {
+    let idf =
+        ((index.doc_count as f64 - doc_freq as f64 + 0.5) / (doc_freq as f64 + 0.5) + 1.0).ln();
+    let tf = term_frequency as f64;
+    let doc_len = doc_len as f64;
+    let k1 = index.config.k1();
+    let b = index.config.b();
+    let k3 = index.config.k3();
+    let qtf = query_frequency as f64;
+    let query_weight = (qtf * (k3 + 1.0)) / (qtf + k3);
+    idf * (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * doc_len / index.avg_len)) * query_weight
+}
+
 fn sort_ranked_documents(ranked: &mut [RankedDocument<'_>], kind: &RankKind) {
     ranked.sort_by(|left, right| ranked_document_order(left, right, kind));
 }
@@ -3529,9 +3786,9 @@ fn apply_limit<'a>(
 }
 
 fn eval_prepared_rank_expr(
+    doc_index: usize,
     document: &Document,
     expression: &PreparedRankExpr<'_>,
-    bm25_stats: Option<&Bm25Stats>,
     distance_metric: DistanceMetric,
 ) -> Result<f64, QueryError> {
     match expression {
@@ -3539,24 +3796,23 @@ fn eval_prepared_rank_expr(
         PreparedRankExpr::Sum(terms) => {
             let mut total = 0.0;
             for term in terms {
-                total += eval_prepared_rank_expr(document, term, bm25_stats, distance_metric)?;
+                total += eval_prepared_rank_expr(doc_index, document, term, distance_metric)?;
             }
             Ok(total)
         }
         PreparedRankExpr::Max(terms) => {
             let mut best = 0.0;
             for term in terms {
-                let score = eval_prepared_rank_expr(document, term, bm25_stats, distance_metric)?;
+                let score = eval_prepared_rank_expr(doc_index, document, term, distance_metric)?;
                 if score > best {
                     best = score;
                 }
             }
             Ok(best)
         }
-        PreparedRankExpr::Product { weight, expression } => {
-            Ok(*weight
-                * eval_prepared_rank_expr(document, expression, bm25_stats, distance_metric)?)
-        }
+        PreparedRankExpr::Product { weight, expression } => Ok(
+            *weight * eval_prepared_rank_expr(doc_index, document, expression, distance_metric)?
+        ),
         PreparedRankExpr::Attribute(attribute) => Ok(document_attr(document, attribute)
             .and_then(value_as_f64)
             .unwrap_or(0.0)),
@@ -3565,8 +3821,8 @@ fn eval_prepared_rank_expr(
             midpoint,
             exponent,
         } => {
-            let score = eval_prepared_rank_expr(document, expression, bm25_stats, distance_metric)?
-                .max(0.0);
+            let score =
+                eval_prepared_rank_expr(doc_index, document, expression, distance_metric)?.max(0.0);
             if score <= 0.0 || *midpoint <= 0.0 || *exponent <= 0.0 {
                 return Ok(0.0);
             }
@@ -3579,7 +3835,7 @@ fn eval_prepared_rank_expr(
             exponent,
         } => {
             let distance =
-                eval_prepared_rank_expr(document, expression, bm25_stats, distance_metric)?.abs();
+                eval_prepared_rank_expr(doc_index, document, expression, distance_metric)?.abs();
             if *midpoint <= 0.0 || *exponent <= 0.0 {
                 return Ok(0.0);
             }
@@ -3592,9 +3848,9 @@ fn eval_prepared_rank_expr(
                     .cloned()
                     .unwrap_or(Value::Null),
                 PreparedDistExpr::Rank(expression) => number_value(eval_prepared_rank_expr(
+                    doc_index,
                     document,
                     expression,
-                    bm25_stats,
                     distance_metric,
                 )?),
             };
@@ -3603,15 +3859,13 @@ fn eval_prepared_rank_expr(
         PreparedRankExpr::DenseDistance { attribute, query } => {
             dense_distance_to_query(document, attribute, query, distance_metric)
         }
+        PreparedRankExpr::DenseDistanceVector { query } => {
+            vector_distance_to_query(document, query, distance_metric)
+        }
         PreparedRankExpr::SparseDotProduct { attribute, query } => {
             sparse_dot_product_with_query(document, attribute, query)
         }
-        PreparedRankExpr::Bm25 { field, query } => bm25_score_with_query(
-            document,
-            field,
-            query.as_ref(),
-            bm25_stats.ok_or_else(|| QueryError::new("BM25 stats were not prepared."))?,
-        ),
+        PreparedRankExpr::Bm25 { scores } => Ok(scores.score(doc_index)),
         PreparedRankExpr::Filter(filter) => Ok(if eval_filter(document, filter)? {
             1.0
         } else {
@@ -3626,42 +3880,42 @@ fn dense_distance(
     query: &Value,
     distance_metric: DistanceMetric,
 ) -> Result<f64, QueryError> {
+    let right = numeric_array(query, "query vector")?;
+    let prepared_query = PreparedDenseQuery {
+        norm: vector_norm(&right),
+        values: right,
+    };
+    if let Some(left) = document.typed.dense_vector(attr) {
+        if left.len() != prepared_query.values.len() {
+            return Err(QueryError::new(format!(
+                "Vector dimension mismatch for '{attr}': document has {}, query has {}.",
+                left.len(),
+                prepared_query.values.len()
+            )));
+        }
+        return Ok(dense_distance_values(
+            left,
+            &prepared_query,
+            distance_metric,
+        ));
+    }
     let left = document
         .attributes
         .get(attr)
         .ok_or_else(|| QueryError::new(format!("Vector attribute '{attr}' is missing.")))?;
     let left = numeric_array(left, attr)?;
-    let right = numeric_array(query, "query vector")?;
-    if left.len() != right.len() {
+    if left.len() != prepared_query.values.len() {
         return Err(QueryError::new(format!(
             "Vector dimension mismatch for '{attr}': document has {}, query has {}.",
             left.len(),
-            right.len()
+            prepared_query.values.len()
         )));
     }
-    match distance_metric {
-        DistanceMetric::EuclideanSquared => Ok(left
-            .iter()
-            .zip(right.iter())
-            .map(|(doc_value, query_value)| {
-                let delta = doc_value - query_value;
-                delta * delta
-            })
-            .sum()),
-        DistanceMetric::CosineDistance => {
-            let dot = left
-                .iter()
-                .zip(right.iter())
-                .map(|(doc_value, query_value)| doc_value * query_value)
-                .sum::<f64>();
-            let left_norm = left.iter().map(|value| value * value).sum::<f64>().sqrt();
-            let right_norm = right.iter().map(|value| value * value).sum::<f64>().sqrt();
-            if left_norm == 0.0 || right_norm == 0.0 {
-                return Ok(1.0);
-            }
-            Ok(1.0 - dot / (left_norm * right_norm))
-        }
-    }
+    Ok(dense_distance_values(
+        &left,
+        &prepared_query,
+        distance_metric,
+    ))
 }
 
 fn dense_distance_to_query(
@@ -3670,6 +3924,16 @@ fn dense_distance_to_query(
     query: &PreparedDenseQuery,
     distance_metric: DistanceMetric,
 ) -> Result<f64, QueryError> {
+    if let Some(values) = document.typed.dense_vector(attr) {
+        if values.len() != query.values.len() {
+            return Err(QueryError::new(format!(
+                "Vector dimension mismatch for '{attr}': document has {}, query has {}.",
+                values.len(),
+                query.values.len()
+            )));
+        }
+        return Ok(dense_distance_values(values, query, distance_metric));
+    }
     let left = document
         .attributes
         .get(attr)
@@ -3709,11 +3973,11 @@ fn dense_distance_to_query(
             .ok_or_else(|| QueryError::new(format!("{attr}[{index}] must be numeric.")))?;
         match distance_metric {
             DistanceMetric::EuclideanSquared => {
-                let delta = doc_value - query_value;
+                let delta = doc_value - *query_value;
                 distance += delta * delta;
             }
             DistanceMetric::CosineDistance => {
-                dot += doc_value * query_value;
+                dot += doc_value * *query_value;
                 norm += doc_value * doc_value;
             }
         }
@@ -3726,6 +3990,56 @@ fn dense_distance_to_query(
                 return Ok(1.0);
             }
             Ok(1.0 - dot / (norm * query.norm))
+        }
+    }
+}
+
+fn vector_distance_to_query(
+    document: &Document,
+    query: &PreparedDenseQuery,
+    distance_metric: DistanceMetric,
+) -> Result<f64, QueryError> {
+    if let Some(values) = document.typed.vector.as_deref() {
+        if values.len() != query.values.len() {
+            return Err(QueryError::new(format!(
+                "Vector dimension mismatch for 'vector': document has {}, query has {}.",
+                values.len(),
+                query.values.len()
+            )));
+        }
+        return Ok(dense_distance_values(values, query, distance_metric));
+    }
+    dense_distance_to_query(document, "vector", query, distance_metric)
+}
+
+fn dense_distance_values(
+    values: &[f64],
+    query: &PreparedDenseQuery,
+    distance_metric: DistanceMetric,
+) -> f64 {
+    let mut dot = 0.0;
+    let mut norm = 0.0;
+    let mut distance = 0.0;
+    for (doc_value, query_value) in values.iter().zip(query.values.iter()) {
+        match distance_metric {
+            DistanceMetric::EuclideanSquared => {
+                let delta = doc_value - query_value;
+                distance += delta * delta;
+            }
+            DistanceMetric::CosineDistance => {
+                dot += doc_value * query_value;
+                norm += doc_value * doc_value;
+            }
+        }
+    }
+    match distance_metric {
+        DistanceMetric::EuclideanSquared => distance,
+        DistanceMetric::CosineDistance => {
+            let norm = norm.sqrt();
+            if norm == 0.0 || query.norm == 0.0 {
+                return 1.0;
+            }
+            1.0 - dot / (norm * query.norm)
         }
     }
 }
@@ -3786,67 +4100,6 @@ fn sparse_dot_product_with_query(
         if let Some(query_value) = query_vector.get(key) {
             score += doc_value * query_value;
         }
-    }
-    Ok(score)
-}
-
-fn bm25_score_with_query(
-    document: &Document,
-    field: &str,
-    query: Option<&PreparedBm25Query>,
-    stats: &Bm25Stats,
-) -> Result<f64, QueryError> {
-    let Some(query) = query else {
-        return Ok(0.0);
-    };
-    if query.terms.is_empty() {
-        return Ok(0.0);
-    }
-    let field_stats = match stats.fields.get(field) {
-        Some(stats) if stats.doc_count > 0 && stats.avg_len > 0.0 => stats,
-        _ => return Ok(0.0),
-    };
-    let document_tokens = string_attr_tokens_with_config(document, field, &field_stats.config);
-    if document_tokens.is_empty() {
-        return Ok(0.0);
-    }
-    let mut term_counts: HashMap<String, usize> = HashMap::new();
-    for token in &document_tokens {
-        let count = term_counts.entry(token.clone()).or_insert(0);
-        *count += 1;
-    }
-    let mut score = 0.0;
-    for term in &query.terms {
-        if term.prefix {
-            if document_tokens
-                .iter()
-                .any(|doc_token| doc_token.starts_with(&term.token))
-            {
-                score += 1.0;
-            }
-            continue;
-        }
-        let Some(tf) = term_counts.get(&term.token).copied() else {
-            continue;
-        };
-        let doc_freq = field_stats.doc_freqs.get(&term.token).copied().unwrap_or(0);
-        if doc_freq == 0 {
-            continue;
-        }
-        let idf = ((field_stats.doc_count as f64 - doc_freq as f64 + 0.5)
-            / (doc_freq as f64 + 0.5)
-            + 1.0)
-            .ln();
-        let tf = tf as f64;
-        let doc_len = document_tokens.len() as f64;
-        let k1 = field_stats.config.k1();
-        let b = field_stats.config.b();
-        let k3 = field_stats.config.k3();
-        let qtf = term.query_frequency as f64;
-        let query_weight = (qtf * (k3 + 1.0)) / (qtf + k3);
-        score += idf * (tf * (k1 + 1.0))
-            / (tf + k1 * (1.0 - b + b * doc_len / field_stats.avg_len))
-            * query_weight;
     }
     Ok(score)
 }
@@ -4284,6 +4537,12 @@ fn project_document(
     match (include, exclude) {
         (None, None) => {}
         (Some(Value::Bool(true)), None) => {
+            if let Some(vector) = document_vector_value(document) {
+                row.insert(
+                    "vector".to_string(),
+                    maybe_encode_vector(&vector, vector_encoding)?,
+                );
+            }
             for (key, value) in &document.attributes {
                 row.insert(key.clone(), maybe_encode_vector(value, vector_encoding)?);
             }
@@ -4291,7 +4550,14 @@ fn project_document(
         (Some(Value::Array(attributes)), None) => {
             for attribute in attributes {
                 let name = as_string(attribute, "include_attributes item")?;
-                if let Some(value) = document.attributes.get(name) {
+                if name == "vector"
+                    && let Some(vector) = document_vector_value(document)
+                {
+                    row.insert(
+                        name.to_string(),
+                        maybe_encode_vector(&vector, vector_encoding)?,
+                    );
+                } else if let Some(value) = document.attributes.get(name) {
                     row.insert(
                         name.to_string(),
                         maybe_encode_vector(value, vector_encoding)?,
@@ -4306,6 +4572,14 @@ fn project_document(
                     as_string(attribute, "exclude_attributes item").map(ToString::to_string)
                 })
                 .collect::<Result<BTreeSet<_>, _>>()?;
+            if !excluded.contains("vector")
+                && let Some(vector) = document_vector_value(document)
+            {
+                row.insert(
+                    "vector".to_string(),
+                    maybe_encode_vector(&vector, vector_encoding)?,
+                );
+            }
             for (key, value) in &document.attributes {
                 if !excluded.contains(key) {
                     row.insert(key.clone(), maybe_encode_vector(value, vector_encoding)?);
@@ -4853,6 +5127,15 @@ fn sparse_map(value: &Value, label: &str) -> Result<HashMap<String, f64>, QueryE
                 })
         })
         .collect()
+}
+
+fn dense_vector_from_value(value: &Value) -> Option<Vec<f64>> {
+    value.as_array().and_then(|items| {
+        if items.is_empty() {
+            return None;
+        }
+        items.iter().map(value_as_f64).collect::<Option<Vec<_>>>()
+    })
 }
 
 fn numeric_array(value: &Value, label: &str) -> Result<Vec<f64>, QueryError> {
