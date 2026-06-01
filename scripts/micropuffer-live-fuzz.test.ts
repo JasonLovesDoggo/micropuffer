@@ -9,12 +9,10 @@ import {
   expectJsonParity,
   loadEnv,
   parseJsonObject,
-  parseMutationResult,
   requiredEnv
 } from "./test-utils";
 import {
-  micropuffer_query,
-  micropuffer_write
+  MicropufferEngine
 } from "micropuffer";
 
 const namespaceName = `micropuffer-live-fuzz-${Date.now()}-${process.pid}`;
@@ -26,7 +24,7 @@ const apiKey = requiredEnv("TURBOPUFFER_API_KEY");
 const region = envOrDefault("TURBOPUFFER_REGION", "gcp-us-central1");
 const baseUrl = `https://${region}.turbopuffer.com`;
 
-let micropufferStore: JsonObject = { namespaces: [] };
+const micropufferEngine = new MicropufferEngine();
 
 afterAll(async () => {
   await deleteLiveNamespace(namespaceName);
@@ -220,17 +218,15 @@ function isKnn(rankBy: JsonValue): boolean {
 
 
 function miniWrite(request: JsonObject): JsonObject {
-  const result = parseMutationResult(
-    micropuffer_write(JSON.stringify(micropufferStore), namespaceName, JSON.stringify(request)),
+  return parseJsonObject(
+    micropufferEngine.write(namespaceName, JSON.stringify(request)),
     "micropuffer write response"
   );
-  micropufferStore = result.store;
-  return result.response;
 }
 
 function miniQuery(request: JsonObject): JsonObject {
   return parseJsonObject(
-    micropuffer_query(JSON.stringify(micropufferStore), namespaceName, JSON.stringify(request)),
+    micropufferEngine.query(namespaceName, JSON.stringify(request)),
     "micropuffer query response"
   );
 }

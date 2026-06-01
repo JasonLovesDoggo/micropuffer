@@ -7,11 +7,6 @@ export type JsonArray = JsonValue[];
 export type JsonObject = { [key: string]: JsonValue };
 export type JsonValue = JsonArray | JsonObject | JsonPrimitive;
 
-export type MutationResult = {
-  response: JsonObject;
-  store: JsonObject;
-};
-
 export type ErrorResult = {
   status: number;
   body: JsonObject;
@@ -21,11 +16,6 @@ export const ENV_PATH = ".env";
 
 const JsonValueSchema = z.json();
 const JsonObjectSchema = z.record(z.string(), JsonValueSchema);
-const MutationResultSchema = z.object({
-  response: JsonObjectSchema,
-  store: JsonObjectSchema
-});
-
 export function loadEnv(): void {
   dotenv.config({ path: ENV_PATH, quiet: true });
 }
@@ -63,14 +53,6 @@ export function parseJsonObject(raw: string, label: string): JsonObject {
   const parsed = JsonObjectSchema.safeParse(JSON.parse(raw));
   if (!parsed.success) {
     throw new Error(`${label} was not a JSON object: ${z.prettifyError(parsed.error)}`);
-  }
-  return parsed.data;
-}
-
-export function parseMutationResult(raw: string, label: string): MutationResult {
-  const parsed = MutationResultSchema.safeParse(JSON.parse(raw));
-  if (!parsed.success) {
-    throw new Error(`${label} did not contain response and store objects: ${z.prettifyError(parsed.error)}`);
   }
   return parsed.data;
 }

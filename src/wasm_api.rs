@@ -1,6 +1,6 @@
-use crate::{Micropuffer, MiniStore, QueryError};
+use crate::{Micropuffer as CoreMicropuffer, MiniStore, QueryError};
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::convert::TryFrom;
 use std::fmt::Display;
 use wasm_bindgen::prelude::*;
@@ -23,13 +23,6 @@ fn write_json(value: impl Serialize) -> Result<String, JsValue> {
     serde_json::to_string(&value).map_err(js_error)
 }
 
-fn write_mutation(engine: &Micropuffer, response: Value) -> Result<String, JsValue> {
-    write_json(json!({
-        "response": response,
-        "store": engine.store()
-    }))
-}
-
 fn page_size_from_request(request: &Value) -> Result<usize, JsValue> {
     match request.get("page_size").and_then(Value::as_u64) {
         Some(page_size) => usize::try_from(page_size)
@@ -43,162 +36,156 @@ fn query_error(error: QueryError) -> JsValue {
 }
 
 #[wasm_bindgen]
-pub fn micropuffer_query(
-    store_json: &str,
-    namespace_name: &str,
-    request_json: &str,
-) -> Result<String, JsValue> {
-    let store = read_store(store_json)?;
-    let request = read_request(request_json)?;
-    let engine = Micropuffer::from_store(store);
-    write_json(
-        engine
-            .query(namespace_name, &request)
-            .map_err(query_error)?,
-    )
+pub struct MicropufferEngine {
+    engine: CoreMicropuffer,
 }
 
 #[wasm_bindgen]
-pub fn micropuffer_write(
-    store_json: &str,
-    namespace_name: &str,
-    request_json: &str,
-) -> Result<String, JsValue> {
-    let store = read_store(store_json)?;
-    let request = read_request(request_json)?;
-    let mut engine = Micropuffer::from_store(store);
-    let response = engine
-        .write(namespace_name, &request)
-        .map_err(query_error)?;
-    write_mutation(&engine, response)
-}
+impl MicropufferEngine {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            engine: CoreMicropuffer::new(),
+        }
+    }
 
-#[wasm_bindgen]
-pub fn micropuffer_delete_namespace(
-    store_json: &str,
-    namespace_name: &str,
-) -> Result<String, JsValue> {
-    let store = read_store(store_json)?;
-    let mut engine = Micropuffer::from_store(store);
-    let response = engine
-        .delete_namespace(namespace_name)
-        .map_err(query_error)?;
-    write_mutation(&engine, response)
-}
+    #[wasm_bindgen(js_name = fromStore)]
+    pub fn from_store(store_json: &str) -> Result<MicropufferEngine, JsValue> {
+        Ok(Self {
+            engine: CoreMicropuffer::from_store(read_store(store_json)?),
+        })
+    }
 
-#[wasm_bindgen]
-pub fn micropuffer_list_namespaces(
-    store_json: &str,
-    request_json: &str,
-) -> Result<String, JsValue> {
-    let store = read_store(store_json)?;
-    let request = read_request(request_json)?;
-    let prefix = request.get("prefix").and_then(Value::as_str);
-    let cursor = request.get("cursor").and_then(Value::as_str);
-    let page_size = page_size_from_request(&request)?;
-    let engine = Micropuffer::from_store(store);
-    write_json(
-        engine
-            .list_namespaces(prefix, cursor, page_size)
-            .map_err(query_error)?,
-    )
-}
+    #[wasm_bindgen(js_name = replaceStore)]
+    pub fn replace_store(&mut self, store_json: &str) -> Result<(), JsValue> {
+        self.engine = CoreMicropuffer::from_store(read_store(store_json)?);
+        Ok(())
+    }
 
-#[wasm_bindgen]
-pub fn micropuffer_metadata(store_json: &str, namespace_name: &str) -> Result<String, JsValue> {
-    let store = read_store(store_json)?;
-    let engine = Micropuffer::from_store(store);
-    write_json(engine.metadata(namespace_name).map_err(query_error)?)
-}
+    #[wasm_bindgen(js_name = exportStore)]
+    pub fn export_store(&self) -> Result<String, JsValue> {
+        write_json(self.engine.store())
+    }
 
-#[wasm_bindgen]
-pub fn micropuffer_schema(store_json: &str, namespace_name: &str) -> Result<String, JsValue> {
-    let store = read_store(store_json)?;
-    let engine = Micropuffer::from_store(store);
-    write_json(engine.schema(namespace_name).map_err(query_error)?)
-}
+    pub fn query(&self, namespace_name: &str, request_json: &str) -> Result<String, JsValue> {
+        let request = read_request(request_json)?;
+        write_json(
+            self.engine
+                .query(namespace_name, &request)
+                .map_err(query_error)?,
+        )
+    }
 
-#[wasm_bindgen]
-pub fn micropuffer_update_schema(
-    store_json: &str,
-    namespace_name: &str,
-    request_json: &str,
-) -> Result<String, JsValue> {
-    let store = read_store(store_json)?;
-    let request = read_request(request_json)?;
-    let mut engine = Micropuffer::from_store(store);
-    let response = engine
-        .update_schema(namespace_name, &request)
-        .map_err(query_error)?;
-    write_mutation(&engine, response)
-}
+    pub fn write(&mut self, namespace_name: &str, request_json: &str) -> Result<String, JsValue> {
+        let request = read_request(request_json)?;
+        write_json(
+            self.engine
+                .write(namespace_name, &request)
+                .map_err(query_error)?,
+        )
+    }
 
-#[wasm_bindgen]
-pub fn micropuffer_patch_metadata(
-    store_json: &str,
-    namespace_name: &str,
-    request_json: &str,
-) -> Result<String, JsValue> {
-    let store = read_store(store_json)?;
-    let request = read_request(request_json)?;
-    let mut engine = Micropuffer::from_store(store);
-    let response = engine
-        .patch_metadata(namespace_name, &request)
-        .map_err(query_error)?;
-    write_mutation(&engine, response)
-}
+    #[wasm_bindgen(js_name = deleteNamespace)]
+    pub fn delete_namespace(&mut self, namespace_name: &str) -> Result<String, JsValue> {
+        write_json(
+            self.engine
+                .delete_namespace(namespace_name)
+                .map_err(query_error)?,
+        )
+    }
 
-#[wasm_bindgen]
-pub fn micropuffer_export_namespace(
-    store_json: &str,
-    namespace_name: &str,
-    request_json: &str,
-) -> Result<String, JsValue> {
-    let store = read_store(store_json)?;
-    let request = read_request(request_json)?;
-    let engine = Micropuffer::from_store(store);
-    write_json(
-        engine
-            .export_namespace(namespace_name, &request)
-            .map_err(query_error)?,
-    )
-}
+    #[wasm_bindgen(js_name = listNamespaces)]
+    pub fn list_namespaces(&self, request_json: &str) -> Result<String, JsValue> {
+        let request = read_request(request_json)?;
+        let prefix = request.get("prefix").and_then(Value::as_str);
+        let cursor = request.get("cursor").and_then(Value::as_str);
+        let page_size = page_size_from_request(&request)?;
+        write_json(
+            self.engine
+                .list_namespaces(prefix, cursor, page_size)
+                .map_err(query_error)?,
+        )
+    }
 
-#[wasm_bindgen]
-pub fn micropuffer_warm_cache(store_json: &str, namespace_name: &str) -> Result<String, JsValue> {
-    let store = read_store(store_json)?;
-    let engine = Micropuffer::from_store(store);
-    write_json(engine.warm_cache(namespace_name).map_err(query_error)?)
-}
+    pub fn metadata(&self, namespace_name: &str) -> Result<String, JsValue> {
+        write_json(self.engine.metadata(namespace_name).map_err(query_error)?)
+    }
 
-#[wasm_bindgen]
-pub fn micropuffer_recall(
-    store_json: &str,
-    namespace_name: &str,
-    request_json: &str,
-) -> Result<String, JsValue> {
-    let store = read_store(store_json)?;
-    let request = read_request(request_json)?;
-    let engine = Micropuffer::from_store(store);
-    write_json(
-        engine
-            .recall(namespace_name, &request)
-            .map_err(query_error)?,
-    )
-}
+    pub fn schema(&self, namespace_name: &str) -> Result<String, JsValue> {
+        write_json(self.engine.schema(namespace_name).map_err(query_error)?)
+    }
 
-#[wasm_bindgen]
-pub fn micropuffer_explain_query(
-    store_json: &str,
-    namespace_name: &str,
-    request_json: &str,
-) -> Result<String, JsValue> {
-    let store = read_store(store_json)?;
-    let request = read_request(request_json)?;
-    let engine = Micropuffer::from_store(store);
-    write_json(
-        engine
-            .explain_query(namespace_name, &request)
-            .map_err(query_error)?,
-    )
+    #[wasm_bindgen(js_name = updateSchema)]
+    pub fn update_schema(
+        &mut self,
+        namespace_name: &str,
+        request_json: &str,
+    ) -> Result<String, JsValue> {
+        let request = read_request(request_json)?;
+        write_json(
+            self.engine
+                .update_schema(namespace_name, &request)
+                .map_err(query_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = patchMetadata)]
+    pub fn patch_metadata(
+        &mut self,
+        namespace_name: &str,
+        request_json: &str,
+    ) -> Result<String, JsValue> {
+        let request = read_request(request_json)?;
+        write_json(
+            self.engine
+                .patch_metadata(namespace_name, &request)
+                .map_err(query_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = exportNamespace)]
+    pub fn export_namespace(
+        &self,
+        namespace_name: &str,
+        request_json: &str,
+    ) -> Result<String, JsValue> {
+        let request = read_request(request_json)?;
+        write_json(
+            self.engine
+                .export_namespace(namespace_name, &request)
+                .map_err(query_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = warmCache)]
+    pub fn warm_cache(&self, namespace_name: &str) -> Result<String, JsValue> {
+        write_json(
+            self.engine
+                .warm_cache(namespace_name)
+                .map_err(query_error)?,
+        )
+    }
+
+    pub fn recall(&self, namespace_name: &str, request_json: &str) -> Result<String, JsValue> {
+        let request = read_request(request_json)?;
+        write_json(
+            self.engine
+                .recall(namespace_name, &request)
+                .map_err(query_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = explainQuery)]
+    pub fn explain_query(
+        &self,
+        namespace_name: &str,
+        request_json: &str,
+    ) -> Result<String, JsValue> {
+        let request = read_request(request_json)?;
+        write_json(
+            self.engine
+                .explain_query(namespace_name, &request)
+                .map_err(query_error)?,
+        )
+    }
 }
