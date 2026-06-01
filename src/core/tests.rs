@@ -2682,11 +2682,15 @@ fn metadata_patch_and_export_match_documented_workspace_shape() {
                 "distance_metric": "cosine_distance",
                 "schema": {
                     "title": {"type": "string", "full_text_search": true},
-                    "published_at": "datetime"
+                    "published_at": "datetime",
+                    "sparse_vector": {
+                        "type": "{}f16",
+                        "sparse_knn": {"distance_metric": "dot_product"}
+                    }
                 },
                 "upsert_rows": [
-                    {"id": 1, "vector": [1.0, 0.0], "title": "alpha", "published_at": "2026-05-31T00:00:00Z", "score": 2},
-                    {"id": 2, "vector": [0.0, 1.0], "title": "beta", "published_at": "2026-05-30T00:00:00Z", "score": 3}
+                    {"id": 1, "vector": [1.0, 0.0], "sparse_vector": {"1": 1.0}, "title": "alpha", "published_at": "2026-05-31T00:00:00Z", "score": 2},
+                    {"id": 2, "vector": [0.0, 1.0], "sparse_vector": {"2": 1.0}, "title": "beta", "published_at": "2026-05-30T00:00:00Z", "score": 3}
                 ]
             }),
         )
@@ -2694,6 +2698,7 @@ fn metadata_patch_and_export_match_documented_workspace_shape() {
     let metadata = clone.metadata("workspace").unwrap();
     assert_eq!(metadata["approx_row_count"], 2);
     assert_eq!(metadata["schema"]["title"]["type"], "string");
+    assert_eq!(metadata["schema"]["title"]["filterable"], false);
     assert_eq!(
         metadata["schema"]["title"]["full_text_search"],
         json!({
@@ -2710,6 +2715,12 @@ fn metadata_patch_and_export_match_documented_workspace_shape() {
         })
     );
     assert_eq!(metadata["schema"]["published_at"]["type"], "datetime");
+    assert_eq!(metadata["schema"]["sparse_vector"]["type"], "{}f16");
+    assert_eq!(metadata["schema"]["sparse_vector"]["filterable"], false);
+    assert_eq!(
+        metadata["schema"]["sparse_vector"]["sparse_knn"]["distance_metric"],
+        "dot_product"
+    );
     assert_eq!(metadata["schema"]["vector"]["type"], "[2]f32");
     assert_eq!(
         metadata["schema"]["vector"]["ann"]["distance_metric"],

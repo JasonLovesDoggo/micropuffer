@@ -60,7 +60,7 @@ Sources checked:
 - `POST /v2/namespaces/:namespace/explain_query`, local shape only; live returned `400` for the temp namespace/index state
 - deprecated `GET /v1/namespaces/:namespace` columnar export
 - `GET /v1/namespaces`, including prefix, query-string `page_size` parsing, live-style `cursor` pagination, exhausted-page `next_cursor: null`, and page-size error parity
-- `GET /v1/namespaces/:namespace/metadata`, schema-shape parity only
+- `GET /v1/namespaces/:namespace/metadata`, exact schema and stable-field parity only
 - `GET /v1/namespaces/:namespace/schema`, exact response parity
 - `POST /v1/namespaces/:namespace/schema`, schema-shape parity only
   - unknown schema option keys are ignored when `type` is present
