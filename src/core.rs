@@ -1,5 +1,8 @@
 use crate::QueryError;
-use base64::{Engine, engine::general_purpose::STANDARD};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
+};
 use chrono::{DateTime, NaiveDate, Utc};
 use deunicode::deunicode;
 use globset::GlobBuilder;
@@ -83,14 +86,6 @@ impl Micropuffer {
         page_size: usize,
     ) -> Result<Value, QueryError> {
         let page_size = page_size.clamp(1, 1000);
-        let start = cursor
-            .map(|cursor| {
-                cursor
-                    .parse::<usize>()
-                    .map_err(|_| QueryError::new("cursor must be a numeric offset."))
-            })
-            .transpose()?
-            .unwrap_or(0);
         let mut names = self
             .store
             .namespaces
@@ -102,18 +97,27 @@ impl Micropuffer {
                     .unwrap_or(true)
             })
             .collect::<Vec<_>>();
-        names.sort_unstable();
-        let page = names
+        names.sort_unstable_by_key(|name| namespace_list_table_key(name));
+        let start = namespace_list_start(&names, cursor)?;
+        let page_names = names
             .iter()
             .skip(start)
             .take(page_size)
+            .copied()
+            .collect::<Vec<_>>();
+        let page = page_names
+            .iter()
             .map(|name| json!({ "id": name }))
             .collect::<Vec<_>>();
-        let next = start + page_size;
         let mut response = Map::new();
         response.insert("namespaces".to_string(), Value::Array(page));
-        if next < names.len() {
-            response.insert("next_cursor".to_string(), Value::String(next.to_string()));
+        if page_names.len() == page_size
+            && let Some(cursor_name) = page_names.last()
+        {
+            response.insert(
+                "next_cursor".to_string(),
+                Value::String(namespace_list_cursor(cursor_name)),
+            );
         }
         Ok(Value::Object(response))
     }
@@ -179,6 +183,45 @@ impl Micropuffer {
 
 fn namespace_not_found(name: &str) -> QueryError {
     QueryError::not_found(format!("🤷 namespace '{name}' was not found"))
+}
+
+fn namespace_list_start(names: &[&str], cursor: Option<&str>) -> Result<usize, QueryError> {
+    let Some(cursor) = cursor else {
+        return Ok(0);
+    };
+    if let Ok(offset) = cursor.parse::<usize>() {
+        return Ok(offset.min(names.len()));
+    }
+    let decoded = STANDARD_NO_PAD
+        .decode(cursor)
+        .or_else(|_| STANDARD.decode(cursor))
+        .map_err(|_| QueryError::new("cursor must be a valid namespace list cursor."))?;
+    let cursor: Value = serde_json::from_slice(&decoded)
+        .map_err(|_| QueryError::new("cursor must be a valid namespace list cursor."))?;
+    let Some(start_after) = cursor
+        .as_object()
+        .and_then(|object| object.get("start_after"))
+        .and_then(Value::as_str)
+    else {
+        return Err(QueryError::new(
+            "cursor must be a valid namespace list cursor.",
+        ));
+    };
+    Ok(names
+        .iter()
+        .position(|name| namespace_list_table_key(name).as_str() > start_after)
+        .unwrap_or(names.len()))
+}
+
+fn namespace_list_cursor(namespace: &str) -> String {
+    STANDARD_NO_PAD.encode(format!(
+        r#"{{"continuation_token":null,"start_after":"{}"}}"#,
+        namespace_list_table_key(namespace)
+    ))
+}
+
+fn namespace_list_table_key(namespace: &str) -> String {
+    format!("{namespace}-table/")
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

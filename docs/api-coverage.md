@@ -59,7 +59,7 @@ Sources checked:
 - `POST /v1/namespaces/:namespace/_debug/recall`, response-shape parity only
 - `POST /v2/namespaces/:namespace/explain_query`, local shape only; live returned `400` for the temp namespace/index state
 - deprecated `GET /v1/namespaces/:namespace` columnar export
-- `GET /v1/namespaces`
+- `GET /v1/namespaces`, including prefix, `page_size`, and live-style `cursor` pagination
 - `GET /v1/namespaces/:namespace/metadata`, schema-shape parity only
 - `GET /v1/namespaces/:namespace/schema`, schema-shape parity only
 - `POST /v1/namespaces/:namespace/schema`, schema-shape parity only
