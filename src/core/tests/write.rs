@@ -917,7 +917,10 @@ fn writes_enforce_schema_types_and_vector_invariants() {
             }),
         )
         .unwrap_err();
-    assert!(patch_vector.to_string().contains("cannot be patched"));
+    assert_eq!(
+        patch_vector.to_string(),
+        "💔 patching vectors is currently unsupported"
+    );
 
     let patch_by_filter_vector = clone
         .write(
@@ -933,8 +936,86 @@ fn writes_enforce_schema_types_and_vector_invariants() {
     assert!(
         patch_by_filter_vector
             .to_string()
-            .contains("cannot be patched")
+            .contains("patching vectors is currently unsupported")
     );
+}
+
+#[test]
+fn patches_cannot_introduce_dense_vector_attribute_into_scalar_namespace() {
+    fn scalar_namespace(name: &str) -> Micropuffer {
+        let mut clone = Micropuffer::new();
+        clone
+            .write(
+                name,
+                &json!({
+                    "upsert_rows": [
+                        {"id": 1, "title": "x"}
+                    ]
+                }),
+            )
+            .unwrap();
+        clone
+    }
+
+    let cases = [
+        (
+            "scalar-patch-rows-vector",
+            json!({
+                "patch_rows": [
+                    {"id": 1, "vector": [1.0, 0.0]}
+                ]
+            }),
+        ),
+        (
+            "scalar-patch-columns-vector",
+            json!({
+                "patch_columns": {
+                    "id": [1],
+                    "vector": [[1.0, 0.0]]
+                }
+            }),
+        ),
+        (
+            "scalar-patch-by-filter-vector",
+            json!({
+                "patch_by_filter": {
+                    "filters": ["id", "Eq", 1],
+                    "patch": {"vector": [1.0, 0.0]}
+                }
+            }),
+        ),
+        (
+            "scalar-patch-rows-vector-null",
+            json!({
+                "patch_rows": [
+                    {"id": 1, "vector": null}
+                ]
+            }),
+        ),
+    ];
+
+    for (namespace, request) in cases {
+        let mut clone = scalar_namespace(namespace);
+        let error = clone.write(namespace, &request).unwrap_err();
+        assert_eq!(error.status_code(), 400);
+        assert_eq!(
+            error.to_string(),
+            "💔 patching vectors is currently unsupported"
+        );
+
+        let response = clone
+            .query(
+                namespace,
+                &json!({
+                    "rank_by": ["id", "asc"],
+                    "limit": 10,
+                    "include_attributes": true
+                }),
+            )
+            .unwrap();
+        assert_eq!(rows(&response), &[json!({"id": 1, "title": "x"})]);
+        assert!(clone.schema(namespace).unwrap().get("vector").is_none());
+    }
 }
 
 #[test]
