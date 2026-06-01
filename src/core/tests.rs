@@ -2262,10 +2262,9 @@ fn copy_can_override_encryption_but_not_mix_with_writes() {
             }),
         )
         .unwrap_err();
-    assert!(
-        invalid
-            .to_string()
-            .contains("copy_from_namespace cannot be combined")
+    assert_eq!(
+        invalid.to_string(),
+        "💔 copy_from_namespace cannot be used with other write request fields"
     );
 }
 
@@ -2527,6 +2526,41 @@ fn vector_writes_require_live_distance_metric_rules() {
 }
 
 #[test]
+fn malformed_write_requests_use_live_style_error_shapes() {
+    let mut clone = Micropuffer::new();
+
+    let row_shape = clone
+        .write("bad-write", &json!({"upsert_rows": {"id": 1}}))
+        .unwrap_err();
+    assert_eq!(row_shape.status_code(), 422);
+    assert_eq!(
+        row_shape.to_string(),
+        "Failed to deserialize the JSON body into the target type: upsert_rows: invalid type: map, expected a sequence"
+    );
+
+    let missing_id = clone
+        .write(
+            "bad-write",
+            &json!({"upsert_rows": [{"vector": [1.0, 0.0]}]}),
+        )
+        .unwrap_err();
+    assert_eq!(missing_id.status_code(), 422);
+    assert_eq!(
+        missing_id.to_string(),
+        "Failed to deserialize the JSON body into the target type: upsert_rows[0]: missing field `id`"
+    );
+
+    let deletes_shape = clone
+        .write("bad-write", &json!({"deletes": true}))
+        .unwrap_err();
+    assert_eq!(deletes_shape.status_code(), 422);
+    assert_eq!(
+        deletes_shape.to_string(),
+        "Failed to deserialize the JSON body into the target type: deletes: data did not match any variant of untagged enum IdVec"
+    );
+}
+
+#[test]
 fn schema_update_and_warm_cache_match_workspace_shapes() {
     let mut clone = Micropuffer::new();
     clone
@@ -2751,10 +2785,9 @@ fn branch_metadata_records_parent_namespace() {
             }),
         )
         .unwrap_err();
-    assert!(
-        invalid_extra_field
-            .to_string()
-            .contains("branch_from_namespace cannot be combined")
+    assert_eq!(
+        invalid_extra_field.to_string(),
+        "💔 branch_from_namespace cannot be used with other write request fields"
     );
 
     let invalid_source_shape = clone

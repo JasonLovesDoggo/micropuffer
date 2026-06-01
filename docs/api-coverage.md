@@ -58,6 +58,10 @@ Sources checked:
 - exact status/body parity for selected Serde-style query validation failures
 - exact status/body parity for missing-namespace query failures
 - exact status/body parity for selected write validation failures
+  - malformed `upsert_rows`
+  - missing row `id`
+  - malformed `deletes`
+  - `copy_from_namespace` mixed with ordinary write fields
 - exact status/body parity for schema type-change validation, including the `attribute` body field
 
 ## Covered by local Rust tests only

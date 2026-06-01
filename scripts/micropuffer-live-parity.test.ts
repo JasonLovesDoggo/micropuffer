@@ -723,6 +723,51 @@ async function assertErrorParity(): Promise<void> {
   const miniAddVectorToScalar = miniWriteError(scalarNamespace, addVectorToScalarWrite);
   expectErrorParity(miniAddVectorToScalar, liveAddVectorToScalar);
   await deleteLiveNamespace(scalarNamespace);
+
+  const malformedRowsWrite: JsonObject = {
+    upsert_rows: { id: 1 }
+  };
+  const liveMalformedRows = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(metricNamespace)}`,
+    malformedRowsWrite
+  );
+  const miniMalformedRows = miniWriteError(metricNamespace, malformedRowsWrite);
+  expectErrorParity(miniMalformedRows, liveMalformedRows);
+
+  const missingIdWrite: JsonObject = {
+    upsert_rows: [{ vector: [1, 0] }]
+  };
+  const liveMissingId = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(metricNamespace)}`,
+    missingIdWrite
+  );
+  const miniMissingId = miniWriteError(metricNamespace, missingIdWrite);
+  expectErrorParity(miniMissingId, liveMissingId);
+
+  const malformedDeletesWrite: JsonObject = {
+    deletes: true
+  };
+  const liveMalformedDeletes = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(metricNamespace)}`,
+    malformedDeletesWrite
+  );
+  const miniMalformedDeletes = miniWriteError(metricNamespace, malformedDeletesWrite);
+  expectErrorParity(miniMalformedDeletes, liveMalformedDeletes);
+
+  const copyConflictWrite: JsonObject = {
+    copy_from_namespace: namespaceName,
+    upsert_rows: [{ id: 1 }]
+  };
+  const liveCopyConflict = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(metricNamespace)}-copy-conflict`,
+    copyConflictWrite
+  );
+  const miniCopyConflict = miniWriteError(`${metricNamespace}-copy-conflict`, copyConflictWrite);
+  expectErrorParity(miniCopyConflict, liveCopyConflict);
 }
 
 async function assertBranchParityIfAllowed(lookup: JsonObject): Promise<void> {
