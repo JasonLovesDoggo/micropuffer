@@ -2447,6 +2447,21 @@ fn query_validation_errors_carry_http_status_codes() {
         "Failed to deserialize the JSON body into the target type: invalid type: boolean `true`, expected a sequence"
     );
 
+    let missing_include_attribute = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["id", "asc"],
+            "limit": 1,
+            "include_attributes": ["missing_attr"]
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(missing_include_attribute.status_code(), 400);
+    assert_eq!(
+        missing_include_attribute.to_string(),
+        "💔 attribute \"missing_attr\" not found in schema, cannot be part of `include_attributes`. consider passing `include_attributes=True` to return all attribute data instead"
+    );
+
     let invalid_vector_encoding = query_namespace(
         &namespace,
         &json!({
@@ -2460,6 +2475,66 @@ fn query_validation_errors_carry_http_status_codes() {
     assert_eq!(
         invalid_vector_encoding.to_string(),
         "Failed to deserialize the JSON body into the target type: vector_encoding: unknown variant `bad`, expected `float` or `base64`"
+    );
+
+    let invalid_consistency_level = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["id", "asc"],
+            "limit": 1,
+            "consistency": {"level": "bad"}
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(invalid_consistency_level.status_code(), 422);
+    assert_eq!(
+        invalid_consistency_level.to_string(),
+        "Failed to deserialize the JSON body into the target type: consistency.level: unknown variant `bad`, expected `strong` or `eventual`"
+    );
+
+    let invalid_consistency_shape = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["id", "asc"],
+            "limit": 1,
+            "consistency": "eventual"
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(invalid_consistency_shape.status_code(), 422);
+    assert_eq!(
+        invalid_consistency_shape.to_string(),
+        "Failed to deserialize the JSON body into the target type: consistency: invalid type: string \"eventual\", expected struct Consistency"
+    );
+
+    let missing_consistency_level = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["id", "asc"],
+            "limit": 1,
+            "consistency": {}
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(missing_consistency_level.status_code(), 422);
+    assert_eq!(
+        missing_consistency_level.to_string(),
+        "Failed to deserialize the JSON body into the target type: consistency: missing field `level`"
+    );
+
+    let invalid_consistency_level_type = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["id", "asc"],
+            "limit": 1,
+            "consistency": {"level": 1}
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(invalid_consistency_level_type.status_code(), 400);
+    assert_eq!(
+        invalid_consistency_level_type.to_string(),
+        "Failed to parse the request body as JSON: consistency.level: expected value"
     );
 }
 

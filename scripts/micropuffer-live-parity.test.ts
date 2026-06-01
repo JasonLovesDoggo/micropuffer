@@ -173,6 +173,16 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
     miniQuery(namespaceName, includeAttributesEmptyQuery)
   );
 
+  const eventualConsistencyQuery: JsonObject = {
+    rank_by: ["id", "asc"],
+    limit: 1,
+    consistency: { level: "eventual" }
+  };
+  expectJsonParity(
+    await liveQuery(namespaceName, eventualConsistencyQuery),
+    miniQuery(namespaceName, eventualConsistencyQuery)
+  );
+
   const base64VectorQuery: JsonObject = {
     rank_by: ["id", "asc"],
     limit: 1,
@@ -680,6 +690,19 @@ async function assertErrorParity(): Promise<void> {
   const miniExcludeAttributes = miniQueryError(namespaceName, invalidExcludeAttributesQuery);
   expectErrorParity(miniExcludeAttributes, liveExcludeAttributes);
 
+  const missingIncludeAttributeQuery: JsonObject = {
+    rank_by: ["id", "asc"],
+    limit: 1,
+    include_attributes: ["missing_attr"]
+  };
+  const liveMissingIncludeAttribute = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(namespaceName)}/query`,
+    missingIncludeAttributeQuery
+  );
+  const miniMissingIncludeAttribute = miniQueryError(namespaceName, missingIncludeAttributeQuery);
+  expectErrorParity(miniMissingIncludeAttribute, liveMissingIncludeAttribute);
+
   const invalidVectorEncodingQuery: JsonObject = {
     rank_by: ["id", "asc"],
     limit: 1,
@@ -692,6 +715,58 @@ async function assertErrorParity(): Promise<void> {
   );
   const miniVectorEncoding = miniQueryError(namespaceName, invalidVectorEncodingQuery);
   expectErrorParity(miniVectorEncoding, liveVectorEncoding);
+
+  const invalidConsistencyLevelQuery: JsonObject = {
+    rank_by: ["id", "asc"],
+    limit: 1,
+    consistency: { level: "bad" }
+  };
+  const liveInvalidConsistencyLevel = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(namespaceName)}/query`,
+    invalidConsistencyLevelQuery
+  );
+  const miniInvalidConsistencyLevel = miniQueryError(namespaceName, invalidConsistencyLevelQuery);
+  expectErrorParity(miniInvalidConsistencyLevel, liveInvalidConsistencyLevel);
+
+  const invalidConsistencyShapeQuery: JsonObject = {
+    rank_by: ["id", "asc"],
+    limit: 1,
+    consistency: "eventual"
+  };
+  const liveInvalidConsistencyShape = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(namespaceName)}/query`,
+    invalidConsistencyShapeQuery
+  );
+  const miniInvalidConsistencyShape = miniQueryError(namespaceName, invalidConsistencyShapeQuery);
+  expectErrorParity(miniInvalidConsistencyShape, liveInvalidConsistencyShape);
+
+  const missingConsistencyLevelQuery: JsonObject = {
+    rank_by: ["id", "asc"],
+    limit: 1,
+    consistency: {}
+  };
+  const liveMissingConsistencyLevel = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(namespaceName)}/query`,
+    missingConsistencyLevelQuery
+  );
+  const miniMissingConsistencyLevel = miniQueryError(namespaceName, missingConsistencyLevelQuery);
+  expectErrorParity(miniMissingConsistencyLevel, liveMissingConsistencyLevel);
+
+  const invalidConsistencyLevelTypeQuery: JsonObject = {
+    rank_by: ["id", "asc"],
+    limit: 1,
+    consistency: { level: 1 }
+  };
+  const liveInvalidConsistencyLevelType = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(namespaceName)}/query`,
+    invalidConsistencyLevelTypeQuery
+  );
+  const miniInvalidConsistencyLevelType = miniQueryError(namespaceName, invalidConsistencyLevelTypeQuery);
+  expectErrorParity(miniInvalidConsistencyLevelType, liveInvalidConsistencyLevelType);
 
   const missingNamespace = `${namespaceName}-missing`;
   const missingQuery: JsonObject = {
