@@ -148,10 +148,48 @@ fn recall_and_explain_query_match_debug_endpoint_shapes() {
             }),
         )
         .unwrap();
-    assert!(
-        explained["plan_text"]
-            .as_str()
-            .expect("plan text")
-            .contains("operation=query")
-    );
+    let plan_text = explained["plan_text"].as_str().expect("plan text");
+    assert!(plan_text.contains("explain_source=micropuffer-local"));
+    assert!(plan_text.contains("parity=not-live-turbopuffer-plan"));
+    assert!(plan_text.contains("async_realism=disabled"));
+    assert!(plan_text.contains("operation=query"));
+    assert!(plan_text.contains("ranker=BM25 attr=text"));
+    assert!(plan_text.contains("candidate_source=bm25_postings_index+indexed_filter_candidates"));
+    assert!(plan_text.contains("projection=default vector_encoding=float"));
+
+    let ann_explained = clone
+        .explain_query(
+            "debug",
+            &json!({
+                "rank_by": ["vector", "ANN", [1.0, 0.0]],
+                "top_k": 2,
+                "include_attributes": ["vector"],
+                "vector_encoding": "base64"
+            }),
+        )
+        .unwrap();
+    let ann_plan_text = ann_explained["plan_text"].as_str().expect("plan text");
+    assert!(ann_plan_text.contains("ranker=ANN attr=vector engine=exact_linear_scan"));
+    assert!(ann_plan_text.contains("root_vector_encoding=base64"));
+    assert!(ann_plan_text.contains("projection=include=[\"vector\"] vector_encoding=base64"));
+
+    let multi_explained = clone
+        .explain_query(
+            "debug",
+            &json!({
+                "queries": [
+                    {"rank_by": ["vector", "ANN", [1.0, 0.0]], "limit": 2},
+                    {"rank_by": ["text", "BM25", "fish"], "limit": 2}
+                ],
+                "rank_by": ["id", "desc"],
+                "filters": ["public", "Eq", 0],
+                "vector_encoding": "base64"
+            }),
+        )
+        .unwrap();
+    let multi_plan_text = multi_explained["plan_text"].as_str().expect("plan text");
+    assert!(multi_plan_text.contains("operation=multi_query"));
+    assert!(multi_plan_text.contains("subqueries=2"));
+    assert!(multi_plan_text.contains("subquery[0].ranker=ANN attr=vector"));
+    assert!(multi_plan_text.contains("subquery[1].ranker=BM25 attr=text"));
 }
