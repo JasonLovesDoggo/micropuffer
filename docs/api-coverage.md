@@ -28,6 +28,7 @@ Sources checked:
   - `BM25`
   - `SparseKNN`
   - order by one attribute
+  - order by multiple attributes
   - rank expressions using `Sum`, `Max`, `Product`, `Attribute`, filters-as-scores
   - filters: equality, membership, array containment, numeric comparisons, array comparisons, glob, case-insensitive glob, regex, fuzzy, token filters, boolean combinators
   - projections with `include_attributes`
@@ -61,7 +62,6 @@ Sources checked:
 - `export_namespace` helper
 - metadata pinning helper
 - namespace delete helper
-- multiple-attribute order-by, local extension for dashboard experiments; live docs currently describe ordering by one attribute
 - `Saturate`, `Decay`, and `Dist` rank operators
 - recall ground-truth projection
 - explain-query plan text
