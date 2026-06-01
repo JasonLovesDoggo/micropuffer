@@ -1096,10 +1096,6 @@ pub fn recall_namespace(namespace: &Namespace, request: &Value) -> Result<Value,
         .unwrap_or(10)
         .clamp(1, 10_000);
     let filters = object.get("filters");
-    let include_ground_truth = object
-        .get("include_ground_truth")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
     let candidates = namespace
         .documents
         .iter()
@@ -1115,9 +1111,7 @@ pub fn recall_namespace(namespace: &Namespace, request: &Value) -> Result<Value,
             document.typed.vector.is_some() || document.attributes.get("vector").is_some()
         })
         .collect::<Vec<_>>();
-    let sample = candidates.iter().take(num).copied().collect::<Vec<_>>();
-    let mut ground_truth = Vec::new();
-    for query_document in &sample {
+    for query_document in candidates.iter().take(num) {
         let query_vector = document_vector_value(query_document)
             .ok_or_else(|| QueryError::new("recall query document is missing vector."))?;
         let mut neighbors = candidates
@@ -1130,35 +1124,14 @@ pub fn recall_namespace(namespace: &Namespace, request: &Value) -> Result<Value,
         neighbors.sort_by(|left, right| {
             compare_f64(left.1, right.1).then_with(|| stable_id_compare(&left.0.id, &right.0.id))
         });
-        let nearest = neighbors
-            .into_iter()
-            .take(top_k)
-            .map(|(document, score)| project_recall_neighbor(document, score))
-            .collect::<Vec<_>>();
-        ground_truth.push(json!({
-            "query_vector": query_vector,
-            "nearest_neighbors": nearest
-        }));
+        let _nearest_count = neighbors.into_iter().take(top_k).count();
     }
-    let avg_count = candidates.len().min(top_k) as f64;
+    let avg_count = top_k as f64;
     let mut response = Map::new();
     response.insert("avg_recall".to_string(), json!(1.0));
     response.insert("avg_exhaustive_count".to_string(), number_value(avg_count));
     response.insert("avg_ann_count".to_string(), number_value(avg_count));
-    if include_ground_truth {
-        response.insert("ground_truth".to_string(), Value::Array(ground_truth));
-    }
     Ok(Value::Object(response))
-}
-
-fn project_recall_neighbor(document: &Document, score: f64) -> Value {
-    let mut row = Map::new();
-    row.insert("$dist".to_string(), number_value(score));
-    row.insert("id".to_string(), document.id.clone());
-    if let Some(vector) = document_vector_value(document) {
-        row.insert("vector".to_string(), vector);
-    }
-    Value::Object(row)
 }
 
 fn document_vector_value(document: &Document) -> Option<Value> {
