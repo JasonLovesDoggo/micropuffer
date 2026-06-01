@@ -1,6 +1,6 @@
 {
   "name": "micropuffer",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "In-memory turbopuffer-compatible query engine for local tests and mocks.",
   "license": "MIT",
   "type": "module",
