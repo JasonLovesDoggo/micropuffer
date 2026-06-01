@@ -143,6 +143,19 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
   };
   expectJsonParity(await liveQuery(namespaceName, base64VectorQuery), miniQuery(namespaceName, base64VectorQuery));
 
+  const perCategoryOrderQuery: JsonObject = {
+    rank_by: ["id", "asc"],
+    limit: {
+      total: 3,
+      per: { attributes: ["category"], limit: 1 }
+    },
+    include_attributes: ["category"]
+  };
+  expectJsonParity(
+    await liveQuery(namespaceName, perCategoryOrderQuery),
+    miniQuery(namespaceName, perCategoryOrderQuery)
+  );
+
   const fuzzyQuery: JsonObject = {
     rank_by: ["id", "asc"],
     limit: 10,
@@ -478,6 +491,23 @@ async function assertErrorParity(): Promise<void> {
   expect(mini.status).toBe(live.status);
   expect(mini.body.status).toBe(live.body.status);
   expect(mini.body.error).toBe(live.body.error);
+
+  const invalidPerQuery: JsonObject = {
+    rank_by: ["text", "BM25", "walrus"],
+    limit: {
+      total: 3,
+      per: { attributes: ["category"], limit: 1 }
+    }
+  };
+  const livePer = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(namespaceName)}/query`,
+    invalidPerQuery
+  );
+  const miniPer = miniQueryError(namespaceName, invalidPerQuery);
+  expect(miniPer.status).toBe(livePer.status);
+  expect(miniPer.body.status).toBe(livePer.body.status);
+  expect(miniPer.body.error).toBe(livePer.body.error);
 }
 
 async function assertBranchParityIfAllowed(lookup: JsonObject): Promise<void> {
