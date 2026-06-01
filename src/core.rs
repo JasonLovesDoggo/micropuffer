@@ -1550,9 +1550,11 @@ fn merge_schema(namespace: &mut Namespace, schema: &Map<String, Value>) -> Resul
                     .ok_or_else(|| QueryError::new("schema changed unexpectedly."))?,
             )?;
             if current_type != incoming_type {
-                return Err(QueryError::new(format!(
-                    "Changing the type of attribute '{attribute}' is not supported."
-                )));
+                return Err(QueryError::schema_type_change(
+                    attribute,
+                    current_type,
+                    incoming_type,
+                ));
             }
         } else if inferred_schema(namespace).contains_key(attribute) {
             let current = inferred_schema(namespace);
@@ -1562,9 +1564,11 @@ fn merge_schema(namespace: &mut Namespace, schema: &Map<String, Value>) -> Resul
                     .ok_or_else(|| QueryError::new("schema inference changed unexpectedly."))?,
             )?;
             if current_type != incoming_type {
-                return Err(QueryError::new(format!(
-                    "Changing the type of attribute '{attribute}' is not supported."
-                )));
+                return Err(QueryError::schema_type_change(
+                    attribute,
+                    current_type,
+                    incoming_type,
+                ));
             }
         }
         if is_dense_vector_type(incoming_type) && !namespace.documents.is_empty() {
