@@ -126,6 +126,15 @@ test("response methods expose HTTP-style status envelopes", () => {
     }
   });
 
+  const invalidNamespace = parseJsonObject(
+    engine.queryResponse("bad namespace", json({ rank_by: ["id", "asc"], limit: 1 })),
+    "invalid namespace response envelope"
+  );
+  expect(invalidNamespace).toStrictEqual({
+    status: 400,
+    body: "Invalid URL: Namespace contains invalid characters, must be [A-Za-z0-9-_.]"
+  });
+
   const write = parseJsonObject(
     engine.writeResponse(
       "local",

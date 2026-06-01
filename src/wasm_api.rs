@@ -42,6 +42,9 @@ struct HttpResponse {
 }
 
 fn error_body(error: &QueryError) -> Value {
+    if error.has_plain_text_body() {
+        return Value::String(error.to_string());
+    }
     let mut body = json!({
         "status": "error",
         "error": error.to_string()

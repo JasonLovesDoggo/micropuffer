@@ -1,7 +1,10 @@
-use crate::core::{
-    DistanceMetric, Document, Micropuffer, MiniStore, Namespace, PATCH_BY_FILTER_LIMIT,
-    ScalarEqKey, default_created_at, default_encryption, namespace_metadata, parse_fts_config,
-    query_namespace, query_store, tokenize, write_store,
+use crate::{
+    QueryError,
+    core::{
+        DistanceMetric, Document, Micropuffer, MiniStore, Namespace, PATCH_BY_FILTER_LIMIT,
+        ScalarEqKey, default_created_at, default_encryption, namespace_metadata, parse_fts_config,
+        query_namespace, query_store, tokenize, write_store,
+    },
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Map, Number, Value, json};
@@ -2449,6 +2452,52 @@ fn missing_namespace_errors_match_live_status_and_text() {
     let delete_error = clone.delete_namespace(missing).unwrap_err();
     assert_eq!(delete_error.status_code(), 404);
     assert_eq!(delete_error.to_string(), expected);
+}
+
+#[test]
+fn path_namespace_validation_matches_live_url_errors() {
+    let mut clone = Micropuffer::new();
+    let invalid_namespace = "bad namespace";
+    const INVALID_MESSAGE: &str =
+        "Invalid URL: Namespace contains invalid characters, must be [A-Za-z0-9-_.]";
+
+    assert_invalid_url_error(clone.write(invalid_namespace, &json!({"upsert_rows": []})));
+    assert_invalid_url_error(clone.query(
+        invalid_namespace,
+        &json!({"rank_by": ["id", "asc"], "limit": 1}),
+    ));
+    assert_invalid_url_error(clone.metadata(invalid_namespace));
+    assert_invalid_url_error(clone.schema(invalid_namespace));
+    assert_invalid_url_error(clone.update_schema(invalid_namespace, &json!({"title": "string"})));
+    assert_invalid_url_error(clone.patch_metadata(invalid_namespace, &json!({"pinning": null})));
+    assert_invalid_url_error(clone.export_namespace(invalid_namespace, &json!({})));
+    assert_invalid_url_error(clone.warm_cache(invalid_namespace));
+    assert_invalid_url_error(clone.recall(invalid_namespace, &json!({"num": 1, "top_k": 1})));
+    assert_invalid_url_error(clone.explain_query(
+        invalid_namespace,
+        &json!({"rank_by": ["id", "asc"], "limit": 1}),
+    ));
+    assert_invalid_url_error(clone.delete_namespace(invalid_namespace));
+
+    let long_namespace = "a".repeat(129);
+    let too_long = clone
+        .write(&long_namespace, &json!({"upsert_rows": []}))
+        .unwrap_err();
+    assert_eq!(too_long.status_code(), 400);
+    assert!(too_long.has_plain_text_body());
+    assert_eq!(
+        too_long.to_string(),
+        format!(
+            "Invalid URL: Namespace `{long_namespace}` is too long, limit is currently 128 characters"
+        )
+    );
+
+    fn assert_invalid_url_error(result: Result<Value, QueryError>) {
+        let error = result.unwrap_err();
+        assert_eq!(error.status_code(), 400);
+        assert!(error.has_plain_text_body());
+        assert_eq!(error.to_string(), INVALID_MESSAGE);
+    }
 }
 
 #[test]
