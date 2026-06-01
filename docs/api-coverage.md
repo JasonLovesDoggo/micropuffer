@@ -70,6 +70,7 @@ Sources checked:
 - exact status/body parity for missing-namespace query failures
 - exact status/body parity for selected write validation failures
   - malformed `upsert_rows`
+  - malformed row, column, patch, and delete document IDs
   - missing row `id`
   - malformed `deletes`
   - `copy_from_namespace` mixed with ordinary write fields

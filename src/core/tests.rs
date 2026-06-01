@@ -3032,6 +3032,45 @@ fn malformed_write_requests_use_live_style_error_shapes() {
         deletes_shape.to_string(),
         "Failed to deserialize the JSON body into the target type: deletes: data did not match any variant of untagged enum IdVec"
     );
+
+    let malformed_row_id = clone
+        .write("bad-write", &json!({"upsert_rows": [{"id": false}]}))
+        .unwrap_err();
+    assert_eq!(malformed_row_id.status_code(), 422);
+    assert_eq!(
+        malformed_row_id.to_string(),
+        "Failed to deserialize the JSON body into the target type: upsert_rows[0].id: data did not match any variant of untagged enum Id"
+    );
+
+    let malformed_patch_id = clone
+        .write("bad-write", &json!({"patch_rows": [{"id": 1.5}]}))
+        .unwrap_err();
+    assert_eq!(malformed_patch_id.status_code(), 422);
+    assert_eq!(
+        malformed_patch_id.to_string(),
+        "Failed to deserialize the JSON body into the target type: patch_rows[0].id: data did not match any variant of untagged enum Id"
+    );
+
+    let malformed_column_id = clone
+        .write(
+            "bad-write",
+            &json!({"upsert_columns": {"id": [true], "title": ["bad"]}}),
+        )
+        .unwrap_err();
+    assert_eq!(malformed_column_id.status_code(), 422);
+    assert_eq!(
+        malformed_column_id.to_string(),
+        "Failed to deserialize the JSON body into the target type: upsert_columns.id: data did not match any variant of untagged enum IdVec"
+    );
+
+    let malformed_delete_id = clone
+        .write("bad-write", &json!({"deletes": [true]}))
+        .unwrap_err();
+    assert_eq!(malformed_delete_id.status_code(), 422);
+    assert_eq!(
+        malformed_delete_id.to_string(),
+        "Failed to deserialize the JSON body into the target type: deletes: data did not match any variant of untagged enum IdVec"
+    );
 }
 
 #[test]

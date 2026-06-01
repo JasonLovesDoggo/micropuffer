@@ -2778,7 +2778,7 @@ fn write_row_from_object(
                 "Failed to deserialize the JSON body into the target type: {field}[{index}]: missing field `id`"
             ))
         })?;
-    validate_document_id(&id)?;
+    validate_document_id(&id, &format!("{field}[{index}].id"), "Id")?;
     let attributes = object
         .iter()
         .filter(|(key, _)| key.as_str() != "id")
@@ -2814,7 +2814,7 @@ fn write_rows_from_columns(
     }
     let mut rows = Vec::with_capacity(ids.len());
     for (index, id) in ids.iter().enumerate() {
-        validate_document_id(id)?;
+        validate_document_id(id, &format!("{field}.id"), "IdVec")?;
         let mut attributes = Map::new();
         for (column, values) in columns {
             if column == "id" {
@@ -2850,7 +2850,7 @@ fn collect_delete_ids(deletes: Option<&Value>) -> Result<Vec<Value>, QueryError>
     })?;
     deletes
         .iter()
-        .map(|id| validate_document_id(id).map(|()| id.clone()))
+        .map(|id| validate_document_id(id, "deletes", "IdVec").map(|()| id.clone()))
         .collect()
 }
 
@@ -3112,14 +3112,18 @@ fn patch_by_filter(
     })
 }
 
-fn validate_document_id(id: &Value) -> Result<(), QueryError> {
+fn validate_document_id(id: &Value, path: &str, enum_name: &str) -> Result<(), QueryError> {
     match id {
         Value::Number(number) if number.as_u64().is_some() => Ok(()),
         Value::String(text) if text.len() <= 64 => Ok(()),
-        _ => Err(QueryError::new(
-            "document IDs must be unsigned integers or strings up to 64 bytes.",
-        )),
+        _ => Err(malformed_id_deserialize_error(path, enum_name)),
     }
+}
+
+fn malformed_id_deserialize_error(path: &str, enum_name: &str) -> QueryError {
+    QueryError::unprocessable(format!(
+        "Failed to deserialize the JSON body into the target type: {path}: data did not match any variant of untagged enum {enum_name}"
+    ))
 }
 
 fn effective_write_id_schema_type(
