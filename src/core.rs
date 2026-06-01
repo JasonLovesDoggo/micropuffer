@@ -1236,9 +1236,7 @@ fn document_vector_value(document: &Document) -> Option<Value> {
 
 pub fn explain_query(namespace: &Namespace, request: &Value) -> Result<Value, QueryError> {
     let object = as_object(request, "query request")?;
-    if object.contains_key("queries") {
-        validate_multi_query_root(object)?;
-    } else if object.contains_key("aggregate_by") {
+    if object.contains_key("aggregate_by") && !object.contains_key("queries") {
         if let Some(filters) = object.get("filters") {
             for document in &namespace.documents {
                 eval_filter_with_schema(document, filters, Some(&namespace.schema))?;
@@ -1452,11 +1450,13 @@ pub fn query_namespace(namespace: &Namespace, request: &Value) -> Result<Value, 
         vector_encoding: parse_vector_encoding(object.get("vector_encoding"))?,
     };
     if let Some(queries) = object.get("queries") {
-        validate_multi_query_root(object)?;
-        let subqueries = as_array(queries, "queries")?;
+        let subqueries = parse_multi_query_subqueries(queries)?;
+        if subqueries.is_empty() {
+            return Err(QueryError::new("💔 must send at least one sub-query"));
+        }
         if subqueries.len() > 16 {
             return Err(QueryError::new(
-                "queries cannot contain more than 16 subqueries.",
+                "💔 multi-query exceeds per-namespace concurrency budget: requires 17 permits, max is 16 (see https://turbopuffer.com/docs/limits)",
             ));
         }
         let mut results = Vec::with_capacity(subqueries.len());
@@ -3496,15 +3496,27 @@ fn legacy_float_id_key(number: &Number) -> Option<String> {
     }
 }
 
-fn validate_multi_query_root(object: &Map<String, Value>) -> Result<(), QueryError> {
-    for key in object.keys() {
-        if key != "queries" && key != "vector_encoding" && key != "consistency" {
-            return Err(QueryError::new(
-                "queries is mutually exclusive with ordinary query fields.",
-            ));
+fn parse_multi_query_subqueries(queries: &Value) -> Result<&Vec<Value>, QueryError> {
+    let Some(subqueries) = queries.as_array() else {
+        return Err(QueryError::unprocessable(
+            "Failed to deserialize the JSON body into the target type: invalid type: string \"bad\", expected a sequence at line 1 column 17",
+        ));
+    };
+    for subquery in subqueries {
+        if subquery.is_object() {
+            continue;
         }
+        if let Some(text) = subquery.as_str() {
+            return Err(QueryError::unprocessable(format!(
+                "Failed to deserialize the JSON body into the target type: invalid type: string \"{text}\", expected struct QueryRankBy at line 1 column 19"
+            )));
+        }
+        return Err(QueryError::unprocessable(format!(
+            "Failed to deserialize the JSON body into the target type: invalid type: {}, expected struct QueryRankBy at line 1 column 19",
+            serde_type_name(subquery)
+        )));
     }
-    Ok(())
+    Ok(subqueries)
 }
 
 fn parse_vector_encoding(value: Option<&Value>) -> Result<VectorEncoding, QueryError> {

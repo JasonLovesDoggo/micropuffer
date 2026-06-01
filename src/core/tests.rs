@@ -1005,6 +1005,65 @@ fn multi_query_preserves_result_order() {
 }
 
 #[test]
+fn multi_query_matches_live_root_leniency_and_validation_errors() {
+    let root_fields = query_namespace(
+        &namespace(),
+        &json!({
+            "queries": [
+                {
+                    "rank_by": ["id", "asc"],
+                    "limit": 1,
+                    "include_attributes": ["vector"]
+                }
+            ],
+            "rank_by": ["id", "desc"],
+            "filters": ["public", "Eq", false],
+            "aggregate_by": {"count": ["Count"]},
+            "vector_encoding": "base64"
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        root_fields["results"][0]["rows"][0]["vector"],
+        "AAAAAAAAAAA="
+    );
+
+    let string_queries = query_namespace(&namespace(), &json!({"queries": "bad"})).unwrap_err();
+    assert_eq!(string_queries.status_code(), 422);
+    assert_eq!(
+        string_queries.to_string(),
+        "Failed to deserialize the JSON body into the target type: invalid type: string \"bad\", expected a sequence at line 1 column 17"
+    );
+
+    let empty_queries = query_namespace(&namespace(), &json!({"queries": []})).unwrap_err();
+    assert_eq!(empty_queries.status_code(), 400);
+    assert_eq!(
+        empty_queries.to_string(),
+        "💔 must send at least one sub-query"
+    );
+
+    let too_many_queries = query_namespace(
+        &namespace(),
+        &json!({
+            "queries": (0..17).map(|_| json!({"rank_by": ["id", "asc"], "limit": 1})).collect::<Vec<_>>()
+        }),
+    )
+    .unwrap_err();
+    assert_eq!(too_many_queries.status_code(), 400);
+    assert_eq!(
+        too_many_queries.to_string(),
+        "💔 multi-query exceeds per-namespace concurrency budget: requires 17 permits, max is 16 (see https://turbopuffer.com/docs/limits)"
+    );
+
+    let invalid_subquery = query_namespace(&namespace(), &json!({"queries": ["bad"]})).unwrap_err();
+    assert_eq!(invalid_subquery.status_code(), 422);
+    assert_eq!(
+        invalid_subquery.to_string(),
+        "Failed to deserialize the JSON body into the target type: invalid type: string \"bad\", expected struct QueryRankBy at line 1 column 19"
+    );
+}
+
+#[test]
 fn base64_vector_encoding_applies_to_included_vectors() {
     let response = query_namespace(
         &namespace(),
