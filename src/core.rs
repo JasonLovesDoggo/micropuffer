@@ -1971,6 +1971,9 @@ fn validate_schema_definition(
     if attribute == "id" {
         validate_id_schema_type(schema_type)?;
     }
+    if is_dense_vector_type(schema_type) && !dense_vector_schema_enables_ann(definition) {
+        return Err(dense_vector_ann_required_error(attribute));
+    }
     let Some(object) = definition.as_object() else {
         return Ok(());
     };
@@ -2029,6 +2032,24 @@ fn validate_schema_definition(
         }
     }
     Ok(())
+}
+
+fn dense_vector_schema_enables_ann(definition: &Value) -> bool {
+    definition
+        .as_object()
+        .and_then(|object| object.get("ann"))
+        .is_some_and(|ann| matches!(ann, Value::Bool(true) | Value::Object(_)))
+}
+
+fn dense_vector_ann_required_error(attribute: &str) -> QueryError {
+    if attribute == "vector" {
+        return QueryError::new(
+            "💔 the `vector` attribute must have `ann` set to `true`, eg: `\"vector\": { \"type\": \"[1024]f32\", \"ann\": true }`",
+        );
+    }
+    QueryError::new(format!(
+        "💔 vector attribute '{attribute}' must have ann:true"
+    ))
 }
 
 fn validate_id_schema_type(schema_type: &str) -> Result<(), QueryError> {
