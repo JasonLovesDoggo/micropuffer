@@ -2891,7 +2891,14 @@ fn upsert_document(
 ) -> Result<bool, QueryError> {
     if let Some(index) = id_index.get(&row.id) {
         if !condition
-            .map(|filter| eval_filter_with_new(&namespace.documents[index], filter, Some(&row)))
+            .map(|filter| {
+                eval_filter_with_new(
+                    &namespace.documents[index],
+                    filter,
+                    Some(&row),
+                    Some(&namespace.schema),
+                )
+            })
             .transpose()?
             .unwrap_or(true)
         {
@@ -2923,7 +2930,14 @@ fn patch_document(
         return Ok(false);
     };
     if !condition
-        .map(|filter| eval_filter_with_new(&namespace.documents[index], filter, Some(&row)))
+        .map(|filter| {
+            eval_filter_with_new(
+                &namespace.documents[index],
+                filter,
+                Some(&row),
+                Some(&namespace.schema),
+            )
+        })
         .transpose()?
         .unwrap_or(true)
     {
@@ -2952,7 +2966,14 @@ fn delete_documents(
             continue;
         };
         if condition
-            .map(|filter| eval_filter_with_new(&namespace.documents[index], filter, None))
+            .map(|filter| {
+                eval_filter_with_new(
+                    &namespace.documents[index],
+                    filter,
+                    None,
+                    Some(&namespace.schema),
+                )
+            })
             .transpose()?
             .unwrap_or(true)
         {
@@ -5366,9 +5387,10 @@ fn eval_filter_with_new(
     document: &Document,
     filter: &Value,
     new_row: Option<&WriteRow>,
+    schema: Option<&Map<String, Value>>,
 ) -> Result<bool, QueryError> {
     let resolved = resolve_ref_new(filter, new_row);
-    eval_filter(document, &resolved)
+    eval_filter_with_schema(document, &resolved, schema)
 }
 
 fn resolve_ref_new(value: &Value, new_row: Option<&WriteRow>) -> Value {
