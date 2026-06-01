@@ -3,12 +3,19 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@11.3.0",
   "scripts": {
-    "build:wasm": "cargo build --lib --target wasm32-unknown-unknown --release && wasm-bindgen --target bundler --out-dir pkg --out-name micropuffer target/wasm32-unknown-unknown/release/micropuffer.wasm",
-    "test:fuzz": "node --experimental-wasm-modules --experimental-strip-types --test scripts/micropuffer-live-fuzz.test.ts",
-    "test:live": "node --experimental-wasm-modules --experimental-strip-types --test scripts/micropuffer-live-parity.test.ts"
+    "build:wasm": "just wasm",
+    "test:fuzz": "just test-fuzz",
+    "test:live": "just test-live"
   },
   "devDependencies": {
-    "@types/node": "^22.15.29"
+    "@types/node": "^25.9.1",
+    "dotenv": "^17.4.2",
+    "fast-check": "^4.8.0",
+    "typescript": "^6.0.3",
+    "vite-plugin-wasm": "^3.6.0",
+    "vitest": "^4.1.7",
+    "zod": "^4.4.3"
   }
 }

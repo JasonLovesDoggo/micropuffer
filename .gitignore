@@ -3,4 +3,6 @@
 .env.*
 !.env.example
 target/
+pkg/
+node_modules/
 *.log

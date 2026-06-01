@@ -1,7 +1,19 @@
-import { strict as assert } from "node:assert";
-import { readFileSync } from "node:fs";
-import test, { after } from "node:test";
-import type { TestContext } from "node:test";
+import { afterAll, expect, test } from "vitest";
+import {
+  type ErrorResult,
+  type JsonObject,
+  type JsonValue,
+  type MutationResult,
+  HttpError,
+  envOrDefault,
+  errorText,
+  expectJsonParity,
+  isJsonObject,
+  loadEnv,
+  parseJsonObject,
+  parseMutationResult,
+  requiredEnv
+} from "./test-utils";
 import {
   micropuffer_explain_query,
   micropuffer_list_namespaces,
@@ -14,29 +26,14 @@ import {
   micropuffer_write
 } from "../pkg/micropuffer.js";
 
-type JsonPrimitive = boolean | null | number | string;
-type JsonArray = JsonValue[];
-type JsonObject = { [key: string]: JsonValue };
-type JsonValue = JsonArray | JsonObject | JsonPrimitive;
 
-type MutationResult = {
-  response: JsonObject;
-  store: JsonObject;
-};
-
-type ErrorResult = {
-  status: number;
-  body: JsonObject;
-};
-
-const ENV_PATH = ".env";
 const NAMESPACE_PREFIX = "micropuffer-live-parity";
 const namespaceName = `${NAMESPACE_PREFIX}-${Date.now()}-${process.pid}`;
 const copyNamespaceName = `${namespaceName}-copy`;
 const branchNamespaceName = `${namespaceName}-branch`;
 const namespacesToDelete = [namespaceName, copyNamespaceName, branchNamespaceName];
 
-loadDotEnv();
+loadEnv();
 
 const apiKey = requiredEnv("TURBOPUFFER_API_KEY");
 const region = envOrDefault("TURBOPUFFER_REGION", "gcp-us-central1");
@@ -44,13 +41,13 @@ const baseUrl = `https://${region}.turbopuffer.com`;
 
 let micropufferStore: JsonObject = { namespaces: [] };
 
-after(async () => {
+afterAll(async () => {
   for (const namespace of namespacesToDelete) {
     await deleteLiveNamespace(namespace);
   }
 });
 
-test("micropuffer wasm matches live turbopuffer for core query and workspace operations", async (context) => {
+test("micropuffer wasm matches live turbopuffer for core query and workspace operations", async () => {
   await deleteLiveNamespace(namespaceName);
   await deleteLiveNamespace(copyNamespaceName);
   await deleteLiveNamespace(branchNamespaceName);
@@ -107,7 +104,7 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
     ]
   };
 
-  assertParity(await liveWrite(namespaceName, seedWrite), miniWrite(namespaceName, seedWrite));
+  expectJsonParity(await liveWrite(namespaceName, seedWrite), miniWrite(namespaceName, seedWrite));
 
   const vectorQuery: JsonObject = {
     rank_by: ["vector", "ANN", [1.0, 0.0]],
@@ -121,7 +118,7 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
     ],
     include_attributes: ["category", "score"]
   };
-  assertParity(await liveQuery(namespaceName, vectorQuery), miniQuery(namespaceName, vectorQuery));
+  expectJsonParity(await liveQuery(namespaceName, vectorQuery), miniQuery(namespaceName, vectorQuery));
 
   const bm25Query: JsonObject = {
     rank_by: ["text", "BM25", "quick walrus"],
@@ -129,21 +126,21 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
     filters: ["category", "Eq", "mammal"],
     include_attributes: ["text"]
   };
-  assertParity(await liveQuery(namespaceName, bm25Query), miniQuery(namespaceName, bm25Query));
+  expectJsonParity(await liveQuery(namespaceName, bm25Query), miniQuery(namespaceName, bm25Query));
 
   const sparseQuery: JsonObject = {
     rank_by: ["sparse_vector", "SparseKNN", { "0": 1.0, "2": 0.1 }],
     limit: 10,
     include_attributes: ["category"]
   };
-  assertParity(await liveQuery(namespaceName, sparseQuery), miniQuery(namespaceName, sparseQuery));
+  expectJsonParity(await liveQuery(namespaceName, sparseQuery), miniQuery(namespaceName, sparseQuery));
 
   const excludeAttributesQuery: JsonObject = {
     rank_by: ["id", "asc"],
     limit: 2,
     exclude_attributes: ["vector", "sparse_vector", "text"]
   };
-  assertParity(
+  expectJsonParity(
     await liveQuery(namespaceName, excludeAttributesQuery),
     miniQuery(namespaceName, excludeAttributesQuery)
   );
@@ -154,7 +151,7 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
     include_attributes: ["vector"],
     vector_encoding: "base64"
   };
-  assertParity(await liveQuery(namespaceName, base64VectorQuery), miniQuery(namespaceName, base64VectorQuery));
+  expectJsonParity(await liveQuery(namespaceName, base64VectorQuery), miniQuery(namespaceName, base64VectorQuery));
 
   const fuzzyQuery: JsonObject = {
     rank_by: ["id", "asc"],
@@ -167,7 +164,7 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
     ],
     include_attributes: ["title"]
   };
-  assertParity(await liveQuery(namespaceName, fuzzyQuery), miniQuery(namespaceName, fuzzyQuery));
+  expectJsonParity(await liveQuery(namespaceName, fuzzyQuery), miniQuery(namespaceName, fuzzyQuery));
 
   await assertColumnAndConditionParity();
 
@@ -176,7 +173,7 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
     group_by: [{ tag: ["ForEachUnique", "tags"] }],
     top_k: 10
   };
-  assertParity(await liveQuery(namespaceName, aggregateQuery), miniQuery(namespaceName, aggregateQuery));
+  expectJsonParity(await liveQuery(namespaceName, aggregateQuery), miniQuery(namespaceName, aggregateQuery));
 
   const multiQuery: JsonObject = {
     queries: [
@@ -184,7 +181,7 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
       { rank_by: ["text", "BM25", "walrus"], limit: 2 }
     ]
   };
-  assertParity(await liveQuery(namespaceName, multiQuery), miniQuery(namespaceName, multiQuery));
+  expectJsonParity(await liveQuery(namespaceName, multiQuery), miniQuery(namespaceName, multiQuery));
 
   const patchByFilter: JsonObject = {
     patch_by_filter: {
@@ -193,27 +190,27 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
     },
     return_affected_ids: true
   };
-  assertParity(await liveWrite(namespaceName, patchByFilter), miniWrite(namespaceName, patchByFilter));
+  expectJsonParity(await liveWrite(namespaceName, patchByFilter), miniWrite(namespaceName, patchByFilter));
 
   const patchedLookup: JsonObject = {
     rank_by: ["id", "asc"],
     limit: 10,
     include_attributes: ["category", "score"]
   };
-  assertParity(await liveQuery(namespaceName, patchedLookup), miniQuery(namespaceName, patchedLookup));
+  expectJsonParity(await liveQuery(namespaceName, patchedLookup), miniQuery(namespaceName, patchedLookup));
 
   const deleteByFilter: JsonObject = {
     delete_by_filter: ["score", "Lt", 6],
     return_affected_ids: true
   };
-  assertParity(await liveWrite(namespaceName, deleteByFilter), miniWrite(namespaceName, deleteByFilter));
+  expectJsonParity(await liveWrite(namespaceName, deleteByFilter), miniWrite(namespaceName, deleteByFilter));
 
   const afterDeleteLookup: JsonObject = {
     rank_by: ["id", "asc"],
     limit: 10,
     include_attributes: ["category", "score"]
   };
-  assertParity(await liveQuery(namespaceName, afterDeleteLookup), miniQuery(namespaceName, afterDeleteLookup));
+  expectJsonParity(await liveQuery(namespaceName, afterDeleteLookup), miniQuery(namespaceName, afterDeleteLookup));
 
   await assertCopyParity(afterDeleteLookup);
   await assertListNamespaceParity();
@@ -222,9 +219,9 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
   await assertSchemaUpdateParity();
   await assertWarmCacheParity();
   await assertRecallParity();
-  await assertExplainQueryParity(context);
+  await assertExplainQueryParity();
   await assertErrorParity();
-  await assertBranchParityIfAllowed(context, afterDeleteLookup);
+  await assertBranchParityIfAllowed(afterDeleteLookup);
 });
 
 async function assertColumnAndConditionParity(): Promise<void> {
@@ -245,7 +242,7 @@ async function assertColumnAndConditionParity(): Promise<void> {
       published_at: ["2026-05-28T00:00:00Z", "2026-05-27T00:00:00Z"]
     }
   };
-  assertParity(await liveWrite(namespaceName, columnWrite), miniWrite(namespaceName, columnWrite));
+  expectJsonParity(await liveWrite(namespaceName, columnWrite), miniWrite(namespaceName, columnWrite));
 
   const conditionalWrite: JsonObject = {
     upsert_rows: [
@@ -289,7 +286,7 @@ async function assertColumnAndConditionParity(): Promise<void> {
     upsert_condition: ["score", "Lt", { "$ref_new": "score" }],
     return_affected_ids: true
   };
-  assertParity(
+  expectJsonParity(
     await liveWrite(namespaceName, conditionalWrite),
     miniWrite(namespaceName, conditionalWrite)
   );
@@ -303,7 +300,7 @@ async function assertColumnAndConditionParity(): Promise<void> {
     patch_condition: ["public", "Eq", 1],
     return_affected_ids: true
   };
-  assertParity(
+  expectJsonParity(
     await liveWrite(namespaceName, conditionalPatch),
     miniWrite(namespaceName, conditionalPatch)
   );
@@ -313,7 +310,7 @@ async function assertColumnAndConditionParity(): Promise<void> {
     delete_condition: ["score", "Gte", 20],
     return_affected_ids: true
   };
-  assertParity(
+  expectJsonParity(
     await liveWrite(namespaceName, conditionalDelete),
     miniWrite(namespaceName, conditionalDelete)
   );
@@ -323,14 +320,14 @@ async function assertColumnAndConditionParity(): Promise<void> {
     limit: 10,
     include_attributes: ["title", "score", "category"]
   };
-  assertParity(await liveQuery(namespaceName, lookup), miniQuery(namespaceName, lookup));
+  expectJsonParity(await liveQuery(namespaceName, lookup), miniQuery(namespaceName, lookup));
 }
 
 async function assertCopyParity(lookup: JsonObject): Promise<void> {
   const liveCopy = await liveWrite(copyNamespaceName, { copy_from_namespace: namespaceName });
   const miniCopy = miniWrite(copyNamespaceName, { copy_from_namespace: namespaceName });
-  assert.equal(liveCopy.rows_affected, miniCopy.rows_affected);
-  assertParity(await liveQuery(copyNamespaceName, lookup), miniQuery(copyNamespaceName, lookup));
+  expect(miniCopy.rows_affected).toBe(liveCopy.rows_affected);
+  expectJsonParity(await liveQuery(copyNamespaceName, lookup), miniQuery(copyNamespaceName, lookup));
 }
 
 async function assertListNamespaceParity(): Promise<void> {
@@ -345,7 +342,7 @@ async function assertListNamespaceParity(): Promise<void> {
     ),
     "micropuffer list response"
   );
-  assert.deepEqual(namespaceIds(live), namespaceIds(mini));
+  expect(namespaceIds(mini)).toStrictEqual(namespaceIds(live));
 }
 
 async function assertMetadataParity(): Promise<void> {
@@ -354,7 +351,7 @@ async function assertMetadataParity(): Promise<void> {
     micropuffer_metadata(JSON.stringify(micropufferStore), namespaceName),
     "micropuffer metadata response"
   );
-  assert.deepEqual(schemaTypes(live), schemaTypes(mini));
+  expect(schemaTypes(mini)).toStrictEqual(schemaTypes(live));
 }
 
 async function assertSchemaParity(): Promise<void> {
@@ -363,7 +360,7 @@ async function assertSchemaParity(): Promise<void> {
     micropuffer_schema(JSON.stringify(micropufferStore), namespaceName),
     "micropuffer schema response"
   );
-  assert.deepEqual(schemaTypes({ schema: live }), schemaTypes({ schema: mini }));
+  expect(schemaTypes({ schema: mini })).toStrictEqual(schemaTypes({ schema: live }));
 }
 
 async function assertSchemaUpdateParity(): Promise<void> {
@@ -388,7 +385,7 @@ async function assertSchemaUpdateParity(): Promise<void> {
     "micropuffer schema update response"
   );
   micropufferStore = miniResult.store;
-  assert.deepEqual(schemaTypes({ schema: live }), schemaTypes({ schema: miniResult.response }));
+  expect(schemaTypes({ schema: miniResult.response })).toStrictEqual(schemaTypes({ schema: live }));
 }
 
 async function assertWarmCacheParity(): Promise<void> {
@@ -400,7 +397,7 @@ async function assertWarmCacheParity(): Promise<void> {
     micropuffer_warm_cache(JSON.stringify(micropufferStore), namespaceName),
     "micropuffer warm cache response"
   );
-  assert.equal(live.status, mini.status);
+  expect(mini.status).toBe(live.status);
 }
 
 async function assertRecallParity(): Promise<void> {
@@ -418,15 +415,15 @@ async function assertRecallParity(): Promise<void> {
     micropuffer_recall(JSON.stringify(micropufferStore), namespaceName, JSON.stringify(request)),
     "micropuffer recall response"
   );
-  assert.equal(typeof live.avg_recall, "number");
-  assert.equal(typeof live.avg_exhaustive_count, "number");
-  assert.equal(typeof live.avg_ann_count, "number");
-  assert.equal(mini.avg_recall, 1);
-  assert.equal(typeof mini.avg_exhaustive_count, "number");
-  assert.equal(typeof mini.avg_ann_count, "number");
+  expect(typeof live.avg_recall).toBe("number");
+  expect(typeof live.avg_exhaustive_count).toBe("number");
+  expect(typeof live.avg_ann_count).toBe("number");
+  expect(mini.avg_recall).toBe(1);
+  expect(typeof mini.avg_exhaustive_count).toBe("number");
+  expect(typeof mini.avg_ann_count).toBe("number");
 }
 
-async function assertExplainQueryParity(context: TestContext): Promise<void> {
+async function assertExplainQueryParity(): Promise<void> {
   const request: JsonObject = {
     rank_by: ["text", "BM25", "walrus"],
     filters: ["public", "Eq", 1],
@@ -440,22 +437,20 @@ async function assertExplainQueryParity(context: TestContext): Promise<void> {
     ),
     "micropuffer explain query response"
   );
-  assert.equal(typeof mini.plan_text, "string");
+  expect(typeof mini.plan_text).toBe("string");
   try {
     const live = await liveJson(
       "POST",
       `/v2/namespaces/${encodeURIComponent(namespaceName)}/explain_query`,
       request
     );
-    assert.deepEqual(Object.keys(live).sort(), Object.keys(mini).sort());
+    expect(Object.keys(mini).sort()).toStrictEqual(Object.keys(live).sort());
   } catch (error) {
     if (
       error instanceof HttpError &&
       (error.status === 400 || error.status === 403 || error.status === 404)
     ) {
-      context.diagnostic(
-        `Skipping explain_query live shape parity: live endpoint returned HTTP ${error.status}.`
-      );
+      console.info(`Skipping explain_query live shape parity: live endpoint returned HTTP ${error.status}.`);
       return;
     }
     throw error;
@@ -475,26 +470,23 @@ async function assertErrorParity(): Promise<void> {
     invalidQuery
   );
   const mini = miniQueryError(namespaceName, invalidQuery);
-  assert.equal(live.status, mini.status);
-  assert.equal(live.body.status, mini.body.status);
-  assert.equal(live.body.error, mini.body.error);
+  expect(mini.status).toBe(live.status);
+  expect(mini.body.status).toBe(live.body.status);
+  expect(mini.body.error).toBe(live.body.error);
 }
 
-async function assertBranchParityIfAllowed(
-  context: TestContext,
-  lookup: JsonObject
-): Promise<void> {
+async function assertBranchParityIfAllowed(lookup: JsonObject): Promise<void> {
   try {
     await liveWrite(branchNamespaceName, { branch_from_namespace: namespaceName });
   } catch (error) {
     if (error instanceof HttpError && error.status === 403) {
-      context.diagnostic("Skipping branch parity: API key is not permitted to branch namespaces.");
+      console.info("Skipping branch parity: API key is not permitted to branch namespaces.");
       return;
     }
     throw error;
   }
   miniWrite(branchNamespaceName, { branch_from_namespace: namespaceName });
-  assertParity(await liveQuery(branchNamespaceName, lookup), miniQuery(branchNamespaceName, lookup));
+  expectJsonParity(await liveQuery(branchNamespaceName, lookup), miniQuery(branchNamespaceName, lookup));
 }
 
 function miniWrite(namespace: string, request: JsonObject): JsonObject {
@@ -599,33 +591,6 @@ async function deleteLiveNamespace(namespace: string): Promise<void> {
   }
 }
 
-function assertParity(live: JsonObject, mini: JsonObject): void {
-  assert.deepEqual(stableJson(live), stableJson(mini));
-}
-
-function stableJson(value: JsonValue): JsonValue {
-  if (Array.isArray(value)) {
-    return value.map(stableJson);
-  }
-  if (isJsonObject(value)) {
-    const stable: JsonObject = {};
-    for (const [key, item] of Object.entries(value)) {
-      if (key === "billing" || key === "performance" || key === "status" || key === "message") {
-        continue;
-      }
-      if (key === "rows_remaining" && item === false) {
-        continue;
-      }
-      stable[key] = stableJson(item);
-    }
-    return stable;
-  }
-  if (typeof value === "number") {
-    return Math.round(value * 1_000) / 1_000;
-  }
-  return value;
-}
-
 function namespaceIds(response: JsonObject): string[] {
   const namespaces = response.namespaces;
   if (!Array.isArray(namespaces)) {
@@ -655,105 +620,4 @@ function schemaTypes(metadata: JsonObject): JsonObject {
     }
   }
   return types;
-}
-
-function parseMutationResult(raw: string, label: string): MutationResult {
-  const parsed = parseJsonObject(raw, label);
-  if (!isJsonObject(parsed.response) || !isJsonObject(parsed.store)) {
-    throw new Error(`${label} did not contain response and store objects.`);
-  }
-  return {
-    response: parsed.response,
-    store: parsed.store
-  };
-}
-
-function parseJsonObject(raw: string, label: string): JsonObject {
-  const parsed: unknown = JSON.parse(raw);
-  if (!isJsonObject(parsed)) {
-    throw new Error(`${label} was not a JSON object.`);
-  }
-  return parsed;
-}
-
-function isJsonObject(value: unknown): value is JsonObject {
-  return isRecord(value) && Object.values(value).every(isJsonValue);
-}
-
-function isJsonValue(value: unknown): value is JsonValue {
-  if (
-    value === null ||
-    typeof value === "boolean" ||
-    typeof value === "number" ||
-    typeof value === "string"
-  ) {
-    return true;
-  }
-  if (Array.isArray(value)) {
-    return value.every(isJsonValue);
-  }
-  return isJsonObject(value);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function requiredEnv(name: string): string {
-  const value = process.env[name];
-  if (value === undefined || value.length === 0) {
-    throw new Error(`${name} is required. Put it in ${ENV_PATH}.`);
-  }
-  return value;
-}
-
-function envOrDefault(name: string, fallback: string): string {
-  const value = process.env[name];
-  return value === undefined || value.length === 0 ? fallback : value;
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function loadDotEnv(): void {
-  let raw = "";
-  try {
-    raw = readFileSync(ENV_PATH, "utf8");
-  } catch {
-    return;
-  }
-  for (const line of raw.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0 || trimmed.startsWith("#")) {
-      continue;
-    }
-    const separator = trimmed.indexOf("=");
-    if (separator <= 0) {
-      continue;
-    }
-    const key = trimmed.slice(0, separator).trim();
-    let value = trimmed.slice(separator + 1).trim();
-    if (
-      ((value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'"))) &&
-      value.length >= 2
-    ) {
-      value = value.slice(1, -1);
-    }
-    if (process.env[key] === undefined) {
-      process.env[key] = value;
-    }
-  }
-}
-
-class HttpError extends Error {
-  readonly status: number;
-  readonly body: string;
-
-  constructor(status: number, body: string) {
-    super(`turbopuffer request failed with HTTP ${status}: ${body}`);
-    this.status = status;
-    this.body = body;
-  }
 }

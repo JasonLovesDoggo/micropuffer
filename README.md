@@ -8,7 +8,7 @@ It intentionally favors correctness over speed. The crate supports row and colum
 
 ```sh
 cargo build
-npm run build:wasm
+pnpm build:wasm
 ```
 
 ## Test
@@ -16,8 +16,9 @@ npm run build:wasm
 ```sh
 cargo test
 cargo clippy --all --benches --tests --examples --all-features
-npm run test:live
-npm run test:fuzz
+pnpm exec tsc --noEmit
+pnpm test:live
+pnpm test:fuzz
 ```
 
 Live parity tests require:
@@ -28,3 +29,5 @@ TURBOPUFFER_REGION=gcp-us-central1
 ```
 
 See `docs/api-coverage.md` for current coverage and known gaps.
+
+The pnpm workspace sets `minimumReleaseAge: 10080`, so dependency installs ignore package versions published in the last seven days.

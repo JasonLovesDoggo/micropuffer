@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: extractions/setup-just@v2
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.3.0
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: cargo install wasm-bindgen-cli --version 0.2.122 --locked
+
+      - run: just check
+
+      - run: just wasm
+
+      - name: Live parity
+        env:
+          TURBOPUFFER_API_KEY: ${{ secrets.TURBOPUFFER_API_KEY }}
+          TURBOPUFFER_REGION: gcp-us-central1
+        run: |
+          if [ -z "$TURBOPUFFER_API_KEY" ]; then
+            echo "TURBOPUFFER_API_KEY is not configured; skipping live parity."
+            exit 0
+          fi
+          just test-live
+          just test-fuzz
