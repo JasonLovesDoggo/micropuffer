@@ -185,11 +185,22 @@ pub struct Namespace {
     pub documents: Vec<Document>,
     #[serde(skip)]
     logical_bytes_cache: NamespaceLogicalBytesCache,
+    #[serde(skip)]
+    fts_index_cache: NamespaceFtsIndexCache,
 }
 
 impl Namespace {
     fn invalidate_logical_bytes(&self) {
         self.logical_bytes_cache.clear();
+    }
+
+    fn invalidate_fts_indexes(&self) {
+        self.fts_index_cache.clear();
+    }
+
+    fn invalidate_query_caches(&self) {
+        self.invalidate_logical_bytes();
+        self.invalidate_fts_indexes();
     }
 
     fn set_cached_logical_bytes(&self, bytes: usize) {
@@ -204,6 +215,30 @@ impl Namespace {
     #[cfg(test)]
     fn has_cached_logical_bytes(&self) -> bool {
         self.logical_bytes_cache.get().is_some()
+    }
+}
+
+#[derive(Debug, Default)]
+struct NamespaceFtsIndexCache {
+    fields: Mutex<HashMap<String, FtsFieldIndex>>,
+}
+
+impl Clone for NamespaceFtsIndexCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl NamespaceFtsIndexCache {
+    fn clear(&self) {
+        self.fields_guard().clear();
+    }
+
+    fn fields_guard(&self) -> MutexGuard<'_, HashMap<String, FtsFieldIndex>> {
+        match self.fields.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 }
 
@@ -436,6 +471,75 @@ struct Bm25Stats {
     fields: HashMap<String, Bm25FieldStats>,
 }
 
+#[derive(Debug, Clone)]
+struct FtsFieldIndex {
+    doc_count: usize,
+    avg_len: f64,
+    doc_freqs: HashMap<String, usize>,
+    doc_lengths: Vec<usize>,
+    postings: HashMap<String, Vec<FtsPosting>>,
+    config: FtsConfig,
+}
+
+#[derive(Debug, Clone)]
+struct FtsPosting {
+    doc_index: usize,
+    term_frequency: usize,
+}
+
+impl FtsFieldIndex {
+    fn build(namespace: &Namespace, field: &str, config: FtsConfig) -> Self {
+        let mut postings_by_doc: HashMap<String, HashMap<usize, usize>> = HashMap::new();
+        let mut doc_lengths = vec![0; namespace.documents.len()];
+        let mut doc_count = 0usize;
+        let mut total_len = 0usize;
+
+        for (doc_index, document) in namespace.documents.iter().enumerate() {
+            let tokens = string_attr_tokens_with_config(document, field, &config);
+            if tokens.is_empty() {
+                continue;
+            }
+            doc_count += 1;
+            total_len += tokens.len();
+            doc_lengths[doc_index] = tokens.len();
+            for token in tokens {
+                let per_doc = postings_by_doc.entry(token).or_default();
+                let count = per_doc.entry(doc_index).or_insert(0);
+                *count += 1;
+            }
+        }
+
+        let mut postings = HashMap::with_capacity(postings_by_doc.len());
+        let mut doc_freqs = HashMap::with_capacity(postings_by_doc.len());
+        for (token, per_doc) in postings_by_doc {
+            doc_freqs.insert(token.clone(), per_doc.len());
+            let mut token_postings = per_doc
+                .into_iter()
+                .map(|(doc_index, term_frequency)| FtsPosting {
+                    doc_index,
+                    term_frequency,
+                })
+                .collect::<Vec<_>>();
+            token_postings.sort_by_key(|posting| posting.doc_index);
+            postings.insert(token, token_postings);
+        }
+
+        let avg_len = if doc_count == 0 {
+            0.0
+        } else {
+            total_len as f64 / doc_count as f64
+        };
+        Self {
+            doc_count,
+            avg_len,
+            doc_freqs,
+            doc_lengths,
+            postings,
+            config,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FtsConfig {
     k1_millis: u64,
@@ -581,6 +685,7 @@ pub fn update_namespace_schema(
         .namespace_mut(namespace_name)
         .ok_or_else(|| QueryError::new(format!("Namespace '{namespace_name}' was not found.")))?;
     merge_schema(namespace, schema)?;
+    namespace.invalidate_fts_indexes();
     namespace.updated_at = logical_now();
     namespace_schema(namespace)
 }
@@ -795,6 +900,7 @@ pub fn write_store(
             .namespace_mut(namespace_name)
             .ok_or_else(|| QueryError::new("namespace disappeared during write."))?;
         merge_schema(namespace, as_object(schema, "schema")?)?;
+        namespace.invalidate_fts_indexes();
         namespace.updated_at = logical_now();
     }
     if let Some(encryption) = request.get("encryption") {
@@ -886,7 +992,7 @@ pub fn write_store(
         || !summary.patched_ids.is_empty()
         || !summary.deleted_ids.is_empty()
     {
-        namespace.invalidate_logical_bytes();
+        namespace.invalidate_query_caches();
         let now = logical_now();
         namespace.last_write_at = Some(now.clone());
         namespace.updated_at = now;
@@ -955,8 +1061,9 @@ fn query_single(
     let limit = parse_limit(object)?;
     let filters = object.get("filters");
     let rank_plan = parse_rank_plan(rank_by, filters.is_some())?;
-    let bm25_stats = rank_plan.contains_bm25.then(|| Bm25Stats::new(namespace));
-    let prepared_rank_plan = prepare_rank_plan(rank_plan, bm25_stats.as_ref())?;
+    let bm25_stats = (rank_plan.contains_bm25 && !rank_by_is_simple_bm25(rank_by))
+        .then(|| Bm25Stats::new(namespace));
+    let prepared_rank_plan = prepare_rank_plan(rank_plan, bm25_stats.as_ref(), namespace)?;
     let ranked = rank_documents(namespace, &prepared_rank_plan, filters, bm25_stats.as_ref())?;
     let ranked = apply_limit(ranked, &limit, &prepared_rank_plan.kind)?;
     let mut rows = Vec::with_capacity(ranked.len());
@@ -1887,6 +1994,7 @@ fn ensure_namespace(store: &mut MiniStore, namespace_name: &str) {
             branching_parent: None,
             documents: Vec::new(),
             logical_bytes_cache: NamespaceLogicalBytesCache::default(),
+            fts_index_cache: NamespaceFtsIndexCache::default(),
         });
     }
 }
@@ -1929,6 +2037,7 @@ fn copy_namespace(
         destination.updated_at = logical_now();
         destination.last_write_at = Some(logical_now());
         destination.documents = source.documents;
+        destination.invalidate_fts_indexes();
         destination.set_cached_logical_bytes(bytes_written);
     } else {
         store.namespaces.push(Namespace {
@@ -1943,6 +2052,7 @@ fn copy_namespace(
             branching_parent: branch.then(|| source.name.clone()),
             documents: source.documents,
             logical_bytes_cache: NamespaceLogicalBytesCache::default(),
+            fts_index_cache: NamespaceFtsIndexCache::default(),
         });
         store
             .namespace_mut(destination_name)
@@ -2583,6 +2693,12 @@ fn rank_expr_contains_bm25(expression: &Value) -> bool {
     array.iter().any(rank_expr_contains_bm25)
 }
 
+fn rank_by_is_simple_bm25(rank_by: &Value) -> bool {
+    rank_by.as_array().is_some_and(|array| {
+        array.len() >= 3 && array.get(1).and_then(Value::as_str) == Some("BM25")
+    })
+}
+
 fn parse_attribute_order(value: &Value) -> Result<(String, SortDirection), QueryError> {
     let array = as_array(value, "rank_by attribute order")?;
     if array.len() != 2 {
@@ -2630,11 +2746,12 @@ fn rank_expression_kind(rank_by: &Value, has_filters: bool) -> Result<RankKind, 
 fn prepare_rank_plan<'a>(
     rank_plan: RankPlan<'a>,
     bm25_stats: Option<&Bm25Stats>,
+    namespace: &Namespace,
 ) -> Result<PreparedRankPlan<'a>, QueryError> {
     let expression = match rank_plan.kind {
         RankKind::AttributeOrder { .. } | RankKind::MultiAttributeOrder { .. } => None,
         RankKind::SmallerIsBetter | RankKind::LargerIsBetter => {
-            Some(prepare_rank_expr(rank_plan.rank_by, bm25_stats)?)
+            Some(prepare_rank_expr(rank_plan.rank_by, bm25_stats, namespace)?)
         }
     };
     Ok(PreparedRankPlan {
@@ -2646,6 +2763,7 @@ fn prepare_rank_plan<'a>(
 fn prepare_rank_expr<'a>(
     expression: &'a Value,
     bm25_stats: Option<&Bm25Stats>,
+    namespace: &Namespace,
 ) -> Result<PreparedRankExpr<'a>, QueryError> {
     if let Some(number) = expression.as_f64() {
         return Ok(PreparedRankExpr::Literal(number));
@@ -2656,9 +2774,9 @@ fn prepare_rank_expr<'a>(
     }
     if let Some(op) = array[0].as_str() {
         match op {
-            "Sum" => return prepare_sum(array, bm25_stats),
-            "Max" => return prepare_max(array, bm25_stats),
-            "Product" => return prepare_product(array, bm25_stats),
+            "Sum" => return prepare_sum(array, bm25_stats, namespace),
+            "Max" => return prepare_max(array, bm25_stats, namespace),
+            "Product" => return prepare_product(array, bm25_stats, namespace),
             "Attribute" => {
                 if array.len() != 2 {
                     return Err(QueryError::new("Attribute requires one attribute name."));
@@ -2668,9 +2786,9 @@ fn prepare_rank_expr<'a>(
                     "Attribute name",
                 )?));
             }
-            "Saturate" => return prepare_saturate(array, bm25_stats),
-            "Decay" => return prepare_decay(array, bm25_stats),
-            "Dist" => return prepare_dist(array, bm25_stats),
+            "Saturate" => return prepare_saturate(array, bm25_stats, namespace),
+            "Decay" => return prepare_decay(array, bm25_stats, namespace),
+            "Dist" => return prepare_dist(array, bm25_stats, namespace),
             "And" | "Or" | "Not" => return Ok(PreparedRankExpr::Filter(expression)),
             _ => {}
         }
@@ -2693,7 +2811,7 @@ fn prepare_rank_expr<'a>(
             }),
             "BM25" => Ok(PreparedRankExpr::Bm25 {
                 field: attr,
-                query: prepare_bm25_query(attr, &array[2], array.get(3), bm25_stats)?,
+                query: prepare_bm25_query(attr, &array[2], array.get(3), bm25_stats, namespace)?,
             }),
             _ => Ok(PreparedRankExpr::Filter(expression)),
         };
@@ -2704,13 +2822,14 @@ fn prepare_rank_expr<'a>(
 fn prepare_sum<'a>(
     array: &'a [Value],
     bm25_stats: Option<&Bm25Stats>,
+    namespace: &Namespace,
 ) -> Result<PreparedRankExpr<'a>, QueryError> {
     let terms = array
         .get(1)
         .ok_or_else(|| QueryError::new("Sum requires terms."))?;
     let terms = as_array(terms, "Sum terms")?
         .iter()
-        .map(|term| prepare_rank_expr(term, bm25_stats))
+        .map(|term| prepare_rank_expr(term, bm25_stats, namespace))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(PreparedRankExpr::Sum(terms))
 }
@@ -2718,6 +2837,7 @@ fn prepare_sum<'a>(
 fn prepare_max<'a>(
     array: &'a [Value],
     bm25_stats: Option<&Bm25Stats>,
+    namespace: &Namespace,
 ) -> Result<PreparedRankExpr<'a>, QueryError> {
     let terms = if array.len() == 2 {
         as_array(&array[1], "Max terms")?.iter().collect::<Vec<_>>()
@@ -2727,7 +2847,7 @@ fn prepare_max<'a>(
     Ok(PreparedRankExpr::Max(
         terms
             .into_iter()
-            .map(|term| prepare_rank_expr(term, bm25_stats))
+            .map(|term| prepare_rank_expr(term, bm25_stats, namespace))
             .collect::<Result<Vec<_>, _>>()?,
     ))
 }
@@ -2735,6 +2855,7 @@ fn prepare_max<'a>(
 fn prepare_product<'a>(
     array: &'a [Value],
     bm25_stats: Option<&Bm25Stats>,
+    namespace: &Namespace,
 ) -> Result<PreparedRankExpr<'a>, QueryError> {
     if array.len() != 3 {
         return Err(QueryError::new(
@@ -2749,20 +2870,21 @@ fn prepare_product<'a>(
     }
     Ok(PreparedRankExpr::Product {
         weight,
-        expression: Box::new(prepare_rank_expr(&array[2], bm25_stats)?),
+        expression: Box::new(prepare_rank_expr(&array[2], bm25_stats, namespace)?),
     })
 }
 
 fn prepare_saturate<'a>(
     array: &'a [Value],
     bm25_stats: Option<&Bm25Stats>,
+    namespace: &Namespace,
 ) -> Result<PreparedRankExpr<'a>, QueryError> {
     if array.len() < 2 {
         return Err(QueryError::new("Saturate requires an expression."));
     }
     let options = array.get(2).and_then(Value::as_object);
     Ok(PreparedRankExpr::Saturate {
-        expression: Box::new(prepare_rank_expr(&array[1], bm25_stats)?),
+        expression: Box::new(prepare_rank_expr(&array[1], bm25_stats, namespace)?),
         midpoint: options
             .and_then(|object| object.get("midpoint"))
             .and_then(value_as_f64)
@@ -2777,13 +2899,14 @@ fn prepare_saturate<'a>(
 fn prepare_decay<'a>(
     array: &'a [Value],
     bm25_stats: Option<&Bm25Stats>,
+    namespace: &Namespace,
 ) -> Result<PreparedRankExpr<'a>, QueryError> {
     if array.len() < 2 {
         return Err(QueryError::new("Decay requires an expression."));
     }
     let options = array.get(2).and_then(Value::as_object);
     Ok(PreparedRankExpr::Decay {
-        expression: Box::new(prepare_rank_expr(&array[1], bm25_stats)?),
+        expression: Box::new(prepare_rank_expr(&array[1], bm25_stats, namespace)?),
         midpoint: options
             .and_then(|object| object.get("midpoint"))
             .map(parse_midpoint)
@@ -2799,6 +2922,7 @@ fn prepare_decay<'a>(
 fn prepare_dist<'a>(
     array: &'a [Value],
     bm25_stats: Option<&Bm25Stats>,
+    namespace: &Namespace,
 ) -> Result<PreparedRankExpr<'a>, QueryError> {
     if array.len() != 3 {
         return Err(QueryError::new(
@@ -2813,10 +2937,14 @@ fn prepare_dist<'a>(
                 .ok_or_else(|| QueryError::new("Dist Attribute requires a name."))?;
             PreparedDistExpr::Attribute(attr)
         } else {
-            PreparedDistExpr::Rank(Box::new(prepare_rank_expr(&array[1], bm25_stats)?))
+            PreparedDistExpr::Rank(Box::new(prepare_rank_expr(
+                &array[1], bm25_stats, namespace,
+            )?))
         }
     } else {
-        PreparedDistExpr::Rank(Box::new(prepare_rank_expr(&array[1], bm25_stats)?))
+        PreparedDistExpr::Rank(Box::new(prepare_rank_expr(
+            &array[1], bm25_stats, namespace,
+        )?))
     };
     Ok(PreparedRankExpr::Dist {
         expression,
@@ -2829,13 +2957,18 @@ fn prepare_bm25_query(
     query: &Value,
     options: Option<&Value>,
     stats: Option<&Bm25Stats>,
+    namespace: &Namespace,
 ) -> Result<Option<PreparedBm25Query>, QueryError> {
-    let stats = stats.ok_or_else(|| QueryError::new("BM25 stats were not prepared."))?;
-    let field_stats = match stats.fields.get(field) {
-        Some(stats) if stats.doc_count > 0 && stats.avg_len > 0.0 => stats,
-        _ => return Ok(None),
-    };
-    let query_tokens = query_tokens_with_config(query, "BM25 query", &field_stats.config)?;
+    let config = stats
+        .and_then(|stats| {
+            stats
+                .fields
+                .get(field)
+                .map(|field_stats| &field_stats.config)
+        })
+        .cloned()
+        .unwrap_or_else(|| fts_config_for_field(namespace, field));
+    let query_tokens = query_tokens_with_config(query, "BM25 query", &config)?;
     if query_tokens.is_empty() {
         return Ok(Some(PreparedBm25Query { terms: Vec::new() }));
     }
@@ -2869,6 +3002,10 @@ fn rank_documents<'a>(
     filters: Option<&Value>,
     bm25_stats: Option<&Bm25Stats>,
 ) -> Result<Vec<RankedDocument<'a>>, QueryError> {
+    if let Some((field, query)) = simple_bm25_expression(rank_plan) {
+        return rank_indexed_bm25_documents(namespace, field, query, filters);
+    }
+
     let mut ranked = Vec::new();
     for document in &namespace.documents {
         if !filters
@@ -2904,6 +3041,145 @@ fn rank_documents<'a>(
         }
     }
     Ok(ranked)
+}
+
+fn simple_bm25_expression<'a>(
+    rank_plan: &'a PreparedRankPlan<'_>,
+) -> Option<(&'a str, &'a PreparedBm25Query)> {
+    if !matches!(rank_plan.kind, RankKind::LargerIsBetter) {
+        return None;
+    }
+    let PreparedRankExpr::Bm25 {
+        field,
+        query: Some(query),
+    } = rank_plan.expression.as_ref()?
+    else {
+        return None;
+    };
+    Some((field, query))
+}
+
+fn rank_indexed_bm25_documents<'a>(
+    namespace: &'a Namespace,
+    field: &str,
+    query: &PreparedBm25Query,
+    filters: Option<&Value>,
+) -> Result<Vec<RankedDocument<'a>>, QueryError> {
+    if query.terms.is_empty() {
+        return Ok(Vec::new());
+    }
+    let scored = score_indexed_bm25(namespace, field, query);
+    let mut ranked = Vec::with_capacity(scored.len());
+    for (doc_index, score) in scored {
+        let Some(document) = namespace.documents.get(doc_index) else {
+            continue;
+        };
+        if !filters
+            .map(|filter| eval_filter_with_schema(document, filter, Some(&namespace.schema)))
+            .transpose()?
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        ranked.push(RankedDocument {
+            doc: document,
+            score,
+        });
+    }
+    Ok(ranked)
+}
+
+fn score_indexed_bm25(
+    namespace: &Namespace,
+    field: &str,
+    query: &PreparedBm25Query,
+) -> Vec<(usize, f64)> {
+    let config = fts_config_for_field(namespace, field);
+    let mut indexes = namespace.fts_index_cache.fields_guard();
+    let rebuild = indexes
+        .get(field)
+        .map(|index| index.config != config)
+        .unwrap_or(true);
+    if rebuild {
+        indexes.insert(
+            field.to_string(),
+            FtsFieldIndex::build(namespace, field, config),
+        );
+    }
+    let Some(index) = indexes.get(field) else {
+        return Vec::new();
+    };
+    score_bm25_index(index, query)
+}
+
+fn score_bm25_index(index: &FtsFieldIndex, query: &PreparedBm25Query) -> Vec<(usize, f64)> {
+    if index.doc_count == 0 || index.avg_len <= 0.0 {
+        return Vec::new();
+    }
+    let mut scores: HashMap<usize, f64> = HashMap::new();
+    for term in &query.terms {
+        if term.prefix {
+            let mut seen_docs = BTreeSet::new();
+            for (token, postings) in &index.postings {
+                if !token.starts_with(&term.token) {
+                    continue;
+                }
+                for posting in postings {
+                    if seen_docs.insert(posting.doc_index) {
+                        let score = scores.entry(posting.doc_index).or_insert(0.0);
+                        *score += 1.0;
+                    }
+                }
+            }
+            continue;
+        }
+        let Some(postings) = index.postings.get(&term.token) else {
+            continue;
+        };
+        let doc_freq = index.doc_freqs.get(&term.token).copied().unwrap_or(0);
+        if doc_freq == 0 {
+            continue;
+        }
+        for posting in postings {
+            let Some(doc_len) = index.doc_lengths.get(posting.doc_index).copied() else {
+                continue;
+            };
+            if doc_len == 0 {
+                continue;
+            }
+            let score = scores.entry(posting.doc_index).or_insert(0.0);
+            *score += bm25_term_score(
+                index,
+                doc_freq,
+                posting.term_frequency,
+                doc_len,
+                term.query_frequency,
+            );
+        }
+    }
+    scores
+        .into_iter()
+        .filter(|(_, score)| *score != 0.0)
+        .collect()
+}
+
+fn bm25_term_score(
+    index: &FtsFieldIndex,
+    doc_freq: usize,
+    term_frequency: usize,
+    doc_len: usize,
+    query_frequency: usize,
+) -> f64 {
+    let idf =
+        ((index.doc_count as f64 - doc_freq as f64 + 0.5) / (doc_freq as f64 + 0.5) + 1.0).ln();
+    let tf = term_frequency as f64;
+    let doc_len = doc_len as f64;
+    let k1 = index.config.k1();
+    let b = index.config.b();
+    let k3 = index.config.k3();
+    let qtf = query_frequency as f64;
+    let query_weight = (qtf * (k3 + 1.0)) / (qtf + k3);
+    idf * (tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b + b * doc_len / index.avg_len)) * query_weight
 }
 
 fn sort_ranked_documents(ranked: &mut [RankedDocument<'_>], kind: &RankKind) {

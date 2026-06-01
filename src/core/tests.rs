@@ -268,7 +268,7 @@ fn bm25_and_rank_operators_score_higher_matches_first() {
     )
     .unwrap();
     assert_eq!(rows(&token_array)[0]["id"], 3);
-    assert_eq!(bm25_stats_build_count(), 2);
+    assert_eq!(bm25_stats_build_count(), 1);
 }
 
 #[test]
@@ -458,6 +458,75 @@ fn fts_schema_options_affect_bm25_and_token_filters() {
         )
         .unwrap();
     assert_eq!(rows(&case_sensitive)[0]["id"], 2);
+}
+
+#[test]
+fn indexed_bm25_updates_after_writes_and_supports_prefix_queries() {
+    let mut clone = Micropuffer::new();
+    clone
+        .write(
+            "fts-index",
+            &json!({
+                "schema": {
+                    "text": {
+                        "type": "string",
+                        "full_text_search": true
+                    }
+                },
+                "upsert_rows": [
+                    {"id": 1, "text": "walrus arctic mammal"},
+                    {"id": 2, "text": "reef coral fish"}
+                ]
+            }),
+        )
+        .unwrap();
+
+    reset_bm25_stats_build_count();
+    let first = clone
+        .query(
+            "fts-index",
+            &json!({
+                "rank_by": ["text", "BM25", "walrus"],
+                "limit": 10
+            }),
+        )
+        .unwrap();
+    assert_eq!(rows(&first)[0]["id"], 1);
+    assert_eq!(bm25_stats_build_count(), 0);
+
+    clone
+        .write(
+            "fts-index",
+            &json!({
+                "patch_rows": [
+                    {"id": 1, "text": "reef coral fish"},
+                    {"id": 2, "text": "walrus arctic mammal"}
+                ]
+            }),
+        )
+        .unwrap();
+
+    let updated = clone
+        .query(
+            "fts-index",
+            &json!({
+                "rank_by": ["text", "BM25", "walrus"],
+                "limit": 10
+            }),
+        )
+        .unwrap();
+    assert_eq!(rows(&updated)[0]["id"], 2);
+
+    let prefix = clone
+        .query(
+            "fts-index",
+            &json!({
+                "rank_by": ["text", "BM25", "arct", {"last_as_prefix": true}],
+                "limit": 10
+            }),
+        )
+        .unwrap();
+    assert_eq!(rows(&prefix)[0]["id"], 2);
 }
 
 #[test]
@@ -940,6 +1009,7 @@ fn patch_by_filter_respects_partial_limit_and_rows_remaining() {
             branching_parent: None,
             documents,
             logical_bytes_cache: Default::default(),
+            fts_index_cache: Default::default(),
         }],
     });
     let too_many = clone
@@ -1449,5 +1519,61 @@ fn write_100k_new_upserts_completes_in_one_batch() {
     assert_eq!(
         store.namespace("bulk-upsert").unwrap().documents.len(),
         100_000
+    );
+}
+
+#[test]
+#[ignore = "performance evidence; run explicitly"]
+fn bm25_100k_indexed_query_benchmark() {
+    let text_buckets = [
+        "walrus arctic mammal",
+        "reef coral fish",
+        "falcon sky bird",
+        "forest fox mammal",
+    ];
+    let rows = (1..=100_000_u64)
+        .map(|id| {
+            json!({
+                "id": id,
+                "text": format!("{} document {id}", text_buckets[id as usize % text_buckets.len()]),
+                "category": format!("category_{}", id % 10)
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut store = MiniStore::default();
+    write_store(
+        &mut store,
+        "bm25-bench",
+        &json!({
+            "schema": {
+                "text": {
+                    "type": "string",
+                    "full_text_search": true
+                }
+            },
+            "upsert_rows": rows
+        }),
+    )
+    .unwrap();
+    let request = json!({
+        "rank_by": ["text", "BM25", "walrus mammal"],
+        "limit": 10
+    });
+
+    let cold_started = std::time::Instant::now();
+    query_store(&store, "bm25-bench", &request).unwrap();
+    let cold_elapsed = cold_started.elapsed();
+
+    let warm_runs = 10;
+    let warm_started = std::time::Instant::now();
+    for _ in 0..warm_runs {
+        std::hint::black_box(query_store(&store, "bm25-bench", &request).unwrap());
+    }
+    let warm_elapsed = warm_started.elapsed();
+    println!(
+        "bm25_100k_indexed_query_benchmark cold_ms={:.3} warm_runs={warm_runs} warm_total_ms={:.3} warm_mean_ms={:.3}",
+        cold_elapsed.as_secs_f64() * 1_000.0,
+        warm_elapsed.as_secs_f64() * 1_000.0,
+        warm_elapsed.as_secs_f64() * 1_000.0 / warm_runs as f64
     );
 }
