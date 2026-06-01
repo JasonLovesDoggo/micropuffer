@@ -2247,6 +2247,55 @@ fn typed_id_schema_rejects_mixed_ids_and_normalizes_uuid_filters() {
         invalid_uuid_in_filter.to_string(),
         "filter error in key `id`: type mismatch, In expects uuid or []uuid, but got '[not-a-uuid, 769C134D-07B8-4225-954A-B6CC5FFC320C]'"
     );
+
+    let conditioned_upsert = clone
+        .write(
+            "id-uuid-filter",
+            &json!({
+                "upsert_rows": [
+                    {"id": "769C134D-07B8-4225-954A-B6CC5FFC320C", "title": "conditioned"}
+                ],
+                "upsert_condition": ["id", "Eq", "769C134D-07B8-4225-954A-B6CC5FFC320C"],
+                "return_affected_ids": true
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        conditioned_upsert["upserted_ids"],
+        json!(["769c134d-07b8-4225-954a-b6cc5ffc320c"])
+    );
+
+    let conditioned_patch = clone
+        .write(
+            "id-uuid-filter",
+            &json!({
+                "patch_rows": [
+                    {"id": "769c134d07b84225954ab6cc5ffc320c", "title": "patched"}
+                ],
+                "patch_condition": ["id", "Eq", "769c134d07b84225954ab6cc5ffc320c"],
+                "return_affected_ids": true
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        conditioned_patch["patched_ids"],
+        json!(["769c134d-07b8-4225-954a-b6cc5ffc320c"])
+    );
+
+    let conditioned_delete = clone
+        .write(
+            "id-uuid-filter",
+            &json!({
+                "deletes": ["urn:uuid:769c134d-07b8-4225-954a-b6cc5ffc320c"],
+                "delete_condition": ["id", "Eq", "urn:uuid:769c134d-07b8-4225-954a-b6cc5ffc320c"],
+                "return_affected_ids": true
+            }),
+        )
+        .unwrap();
+    assert_eq!(
+        conditioned_delete["deleted_ids"],
+        json!(["769c134d-07b8-4225-954a-b6cc5ffc320c"])
+    );
 }
 
 #[test]
