@@ -1,7 +1,7 @@
 use crate::core::{
     DistanceMetric, Document, Micropuffer, MiniStore, Namespace, PATCH_BY_FILTER_LIMIT,
-    default_created_at, default_encryption, parse_fts_config, query_namespace, query_store,
-    tokenize, write_store,
+    bm25_stats_build_count, default_created_at, default_encryption, parse_fts_config,
+    query_namespace, query_store, reset_bm25_stats_build_count, tokenize, write_store,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Map, Number, Value, json};
@@ -203,7 +203,42 @@ fn filters_support_documented_fuzzy_options_token_arrays_and_null_comparisons() 
 }
 
 #[test]
+fn non_bm25_rank_plans_do_not_build_bm25_stats() {
+    let namespace = namespace();
+    let non_bm25_queries = [
+        json!({
+            "rank_by": ["vector", "ANN", [0.0, 0.0]],
+            "limit": 2
+        }),
+        json!({
+            "rank_by": ["sparse_vector", "SparseKNN", {"a": 1.0}],
+            "limit": 2
+        }),
+        json!({
+            "rank_by": ["score", "desc"],
+            "limit": 2
+        }),
+        json!({
+            "rank_by": [["tenant_id", "asc"], ["score", "desc"]],
+            "limit": 2
+        }),
+        json!({
+            "rank_by": ["Decay", ["Dist", ["Attribute", "timestamp"], "2026-05-31T00:00:00Z"], { "midpoint": "1d" }],
+            "limit": 2
+        }),
+    ];
+
+    for query in non_bm25_queries {
+        reset_bm25_stats_build_count();
+        query_namespace(&namespace, &query).unwrap();
+        assert_eq!(bm25_stats_build_count(), 0, "query: {query}");
+    }
+}
+
+#[test]
 fn bm25_and_rank_operators_score_higher_matches_first() {
+    reset_bm25_stats_build_count();
+
     let response = query_namespace(
         &namespace(),
         &json!({
@@ -221,6 +256,7 @@ fn bm25_and_rank_operators_score_higher_matches_first() {
     assert!(
         response_rows[0]["$dist"].as_f64().unwrap() > response_rows[1]["$dist"].as_f64().unwrap()
     );
+    assert_eq!(bm25_stats_build_count(), 1);
 
     let token_array = query_namespace(
         &namespace(),
@@ -231,6 +267,7 @@ fn bm25_and_rank_operators_score_higher_matches_first() {
     )
     .unwrap();
     assert_eq!(rows(&token_array)[0]["id"], 3);
+    assert_eq!(bm25_stats_build_count(), 2);
 }
 
 #[test]
