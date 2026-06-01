@@ -533,22 +533,7 @@ async function assertSchemaParity(): Promise<void> {
     micropuffer.schema(namespaceName),
     "micropuffer schema response"
   );
-  expect(requireObject(mini.id, "micropuffer id schema").filterable).toBe(
-    requireObject(live.id, "live id schema").filterable
-  );
-  expect(requireObject(mini.id, "micropuffer id schema").full_text_search).toBe(
-    requireObject(live.id, "live id schema").full_text_search
-  );
-  expect(requireObject(mini.vector, "micropuffer vector schema").ann).toStrictEqual(
-    requireObject(live.vector, "live vector schema").ann
-  );
-  expect(requireObject(mini.category, "micropuffer category schema").filterable).toBe(
-    requireObject(live.category, "live category schema").filterable
-  );
-  expect(requireObject(mini.text, "micropuffer text schema").full_text_search).toStrictEqual(
-    requireObject(live.text, "live text schema").full_text_search
-  );
-  expect(schemaTypes({ schema: mini })).toStrictEqual(schemaTypes({ schema: live }));
+  expectJsonParity(live, mini);
 }
 
 async function assertSchemaUpdateParity(): Promise<void> {

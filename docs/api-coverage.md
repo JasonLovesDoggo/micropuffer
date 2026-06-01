@@ -61,7 +61,7 @@ Sources checked:
 - deprecated `GET /v1/namespaces/:namespace` columnar export
 - `GET /v1/namespaces`, including prefix, query-string `page_size` parsing, live-style `cursor` pagination, exhausted-page `next_cursor: null`, and page-size error parity
 - `GET /v1/namespaces/:namespace/metadata`, schema-shape parity only
-- `GET /v1/namespaces/:namespace/schema`, schema-shape parity only
+- `GET /v1/namespaces/:namespace/schema`, exact response parity
 - `POST /v1/namespaces/:namespace/schema`, schema-shape parity only
   - unknown schema option keys are ignored when `type` is present
   - object definitions without `type` return live-style `422` deserialize errors
