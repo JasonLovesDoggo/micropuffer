@@ -1150,3 +1150,59 @@ fn branch_metadata_records_parent_namespace() {
             .contains("branch_from_namespace must be a string")
     );
 }
+
+#[test]
+fn write_id_index_preserves_numeric_id_matching_for_loaded_stores() {
+    let namespace: Namespace =
+        serde_json::from_str(r#"{"name":"loaded","documents":[{"id":1.0,"score":1}]}"#).unwrap();
+    let mut store = MiniStore {
+        namespaces: vec![namespace],
+    };
+    let response = write_store(
+        &mut store,
+        "loaded",
+        &json!({
+            "patch_rows": [{"id": 1, "score": 2}],
+            "return_affected_ids": true
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(response["rows_patched"], 1);
+    assert_eq!(response["patched_ids"], json!([1]));
+    assert_eq!(
+        store.namespace("loaded").unwrap().documents[0].attributes["score"],
+        2
+    );
+}
+
+#[test]
+#[ignore = "performance evidence; run explicitly"]
+fn write_100k_new_upserts_completes_in_one_batch() {
+    let mut rows = Vec::with_capacity(100_000);
+    for id in 0..100_000_u64 {
+        let mut row = Map::new();
+        row.insert("id".to_string(), Value::Number(Number::from(id)));
+        row.insert("vector".to_string(), json!([0.0, 1.0]));
+        row.insert("score".to_string(), Value::Number(Number::from(id)));
+        rows.push(Value::Object(row));
+    }
+    let mut store = MiniStore::default();
+    let started = std::time::Instant::now();
+    let response = write_store(
+        &mut store,
+        "bulk-upsert",
+        &json!({
+            "upsert_rows": rows
+        }),
+    )
+    .unwrap();
+    let elapsed = started.elapsed();
+
+    println!("100k new upserts elapsed: {elapsed:?}");
+    assert_eq!(response["rows_upserted"], 100_000);
+    assert_eq!(
+        store.namespace("bulk-upsert").unwrap().documents.len(),
+        100_000
+    );
+}
