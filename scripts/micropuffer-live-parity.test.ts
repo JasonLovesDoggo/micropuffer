@@ -338,6 +338,18 @@ async function assertMetadataParity(): Promise<void> {
     micropuffer.metadata(namespaceName),
     "micropuffer metadata response"
   );
+  const liveSchema = requireObject(live.schema, "live metadata schema");
+  const miniSchema = requireObject(mini.schema, "micropuffer metadata schema");
+  expect(mini.encryption).toStrictEqual(live.encryption);
+  expect(requireObject(miniSchema.vector, "micropuffer metadata vector schema").ann).toStrictEqual(
+    requireObject(liveSchema.vector, "live metadata vector schema").ann
+  );
+  expect(requireObject(miniSchema.category, "micropuffer metadata category schema").filterable).toBe(
+    requireObject(liveSchema.category, "live metadata category schema").filterable
+  );
+  expect(requireObject(miniSchema.text, "micropuffer metadata text schema").full_text_search).toStrictEqual(
+    requireObject(liveSchema.text, "live metadata text schema").full_text_search
+  );
   expect(schemaTypes(mini)).toStrictEqual(schemaTypes(live));
 }
 
@@ -346,6 +358,21 @@ async function assertSchemaParity(): Promise<void> {
   const mini = parseJsonObject(
     micropuffer.schema(namespaceName),
     "micropuffer schema response"
+  );
+  expect(requireObject(mini.id, "micropuffer id schema").filterable).toBe(
+    requireObject(live.id, "live id schema").filterable
+  );
+  expect(requireObject(mini.id, "micropuffer id schema").full_text_search).toBe(
+    requireObject(live.id, "live id schema").full_text_search
+  );
+  expect(requireObject(mini.vector, "micropuffer vector schema").ann).toStrictEqual(
+    requireObject(live.vector, "live vector schema").ann
+  );
+  expect(requireObject(mini.category, "micropuffer category schema").filterable).toBe(
+    requireObject(live.category, "live category schema").filterable
+  );
+  expect(requireObject(mini.text, "micropuffer text schema").full_text_search).toStrictEqual(
+    requireObject(live.text, "live text schema").full_text_search
   );
   expect(schemaTypes({ schema: mini })).toStrictEqual(schemaTypes({ schema: live }));
 }
@@ -596,4 +623,11 @@ function schemaTypes(metadata: JsonObject): JsonObject {
     }
   }
   return types;
+}
+
+function requireObject(value: JsonValue, label: string): JsonObject {
+  if (!isJsonObject(value)) {
+    throw new Error(`${label} was not a JSON object.`);
+  }
+  return value;
 }
