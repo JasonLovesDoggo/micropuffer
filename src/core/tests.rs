@@ -2097,8 +2097,28 @@ fn metadata_patch_and_export_match_documented_workspace_shape() {
     let metadata = clone.metadata("workspace").unwrap();
     assert_eq!(metadata["approx_row_count"], 2);
     assert_eq!(metadata["schema"]["title"]["type"], "string");
-    assert_eq!(metadata["schema"]["published_at"], "datetime");
-    assert_eq!(metadata["schema"]["vector"], "[2]f32");
+    assert_eq!(
+        metadata["schema"]["title"]["full_text_search"],
+        json!({
+            "k1": 1.2,
+            "b": 0.75,
+            "k3": 8.0,
+            "language": "english",
+            "stemming": false,
+            "remove_stopwords": false,
+            "ascii_folding": false,
+            "case_sensitive": false,
+            "max_token_length": 39,
+            "tokenizer": "word_v3"
+        })
+    );
+    assert_eq!(metadata["schema"]["published_at"]["type"], "datetime");
+    assert_eq!(metadata["schema"]["vector"]["type"], "[2]f32");
+    assert_eq!(
+        metadata["schema"]["vector"]["ann"]["distance_metric"],
+        "cosine_distance"
+    );
+    assert_eq!(metadata["encryption"], json!({"sse": true}));
     assert_eq!(metadata["index"]["status"], "up-to-date");
     assert!(metadata.get("last_write_at").is_some());
 
@@ -2142,8 +2162,13 @@ fn schema_update_and_warm_cache_match_workspace_shapes() {
         .unwrap();
     let schema = clone.schema("schema-api").unwrap();
     assert_eq!(schema["id"]["type"], "uint");
+    assert!(schema["id"]["filterable"].is_null());
+    assert!(schema["id"]["full_text_search"].is_null());
     assert_eq!(schema["vector"]["type"], "[2]f32");
+    assert_eq!(schema["vector"]["ann"], true);
     assert_eq!(schema["title"]["type"], "string");
+    assert_eq!(schema["title"]["filterable"], true);
+    assert!(schema["title"]["full_text_search"].is_null());
 
     let updated = clone
         .update_schema(
@@ -2162,6 +2187,8 @@ fn schema_update_and_warm_cache_match_workspace_shapes() {
         )
         .unwrap();
     assert_eq!(updated["title"]["full_text_search"]["stemming"], true);
+    assert_eq!(updated["title"]["full_text_search"]["k1"], 1.2);
+    assert_eq!(updated["title"]["full_text_search"]["tokenizer"], "word_v3");
     assert_eq!(updated["title"]["regex"], true);
 
     let warmed = clone.warm_cache("schema-api").unwrap();

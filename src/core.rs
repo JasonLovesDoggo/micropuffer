@@ -307,7 +307,7 @@ fn default_created_at() -> String {
 }
 
 fn default_encryption() -> Value {
-    json!({ "mode": "default" })
+    json!({ "sse": true })
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
@@ -805,7 +805,12 @@ pub fn query_store(
 
 pub fn namespace_metadata(namespace: &Namespace) -> Result<Value, QueryError> {
     let mut response = Map::new();
-    let schema = schema_with_id(namespace);
+    let schema = schema_with_id(namespace)
+        .into_iter()
+        .map(|(attribute, definition)| {
+            normalize_metadata_schema_definition(namespace, &attribute, &definition)
+        })
+        .collect::<Result<Map<_, _>, _>>()?;
     response.insert("schema".to_string(), Value::Object(schema));
     response.insert(
         "approx_logical_bytes".to_string(),
@@ -848,7 +853,9 @@ pub fn namespace_metadata(namespace: &Namespace) -> Result<Value, QueryError> {
 pub fn namespace_schema(namespace: &Namespace) -> Result<Value, QueryError> {
     let schema = schema_with_id(namespace)
         .into_iter()
-        .map(|(attribute, definition)| normalize_schema_definition(&attribute, &definition))
+        .map(|(attribute, definition)| {
+            normalize_schema_response_definition(&attribute, &definition)
+        })
         .collect::<Result<Map<_, _>, _>>()?;
     Ok(Value::Object(schema))
 }
@@ -1698,7 +1705,8 @@ fn schema_type_name(definition: &Value) -> Result<&str, QueryError> {
         })
 }
 
-fn normalize_schema_definition(
+fn normalize_metadata_schema_definition(
+    namespace: &Namespace,
     attribute: &str,
     definition: &Value,
 ) -> Result<(String, Value), QueryError> {
@@ -1713,11 +1721,69 @@ fn normalize_schema_definition(
         }
     };
     config.insert("type".to_string(), Value::String(schema_type.clone()));
-    if attribute == "vector" && is_dense_vector_type(&schema_type) && !config.contains_key("ann") {
+    if is_dense_vector_type(&schema_type) {
         config.insert(
             "ann".to_string(),
-            json!({ "distance_metric": "euclidean_squared" }),
+            json!({ "distance_metric": namespace.distance_metric }),
         );
+    } else if attribute != "id" && !config.contains_key("filterable") {
+        config.insert("filterable".to_string(), Value::Bool(true));
+    }
+    if let Some(full_text_search) = config.get("full_text_search").cloned()
+        && full_text_search != Value::Bool(false)
+    {
+        config.insert(
+            "full_text_search".to_string(),
+            fts_config_schema_value(&parse_fts_config(&full_text_search)?),
+        );
+    }
+    Ok((attribute.to_string(), Value::Object(config)))
+}
+
+fn normalize_schema_response_definition(
+    attribute: &str,
+    definition: &Value,
+) -> Result<(String, Value), QueryError> {
+    let schema_type = schema_type_name(definition)?.to_string();
+    let mut config = match definition {
+        Value::Object(object) => object.clone(),
+        Value::String(_) => Map::new(),
+        _ => {
+            return Err(QueryError::new(
+                "schema definitions must be strings or objects with a type.",
+            ));
+        }
+    };
+    config.insert("type".to_string(), Value::String(schema_type.clone()));
+    if !config.contains_key("filterable") {
+        let inferred_filterable = attribute != "id"
+            && !is_dense_vector_type(&schema_type)
+            && matches!(definition, Value::String(_));
+        config.insert(
+            "filterable".to_string(),
+            if inferred_filterable {
+                Value::Bool(true)
+            } else {
+                Value::Null
+            },
+        );
+    }
+    if let Some(full_text_search) = config.get("full_text_search").cloned()
+        && full_text_search != Value::Null
+        && full_text_search != Value::Bool(false)
+    {
+        config.insert(
+            "full_text_search".to_string(),
+            fts_config_schema_value(&parse_fts_config(&full_text_search)?),
+        );
+    }
+    config
+        .entry("full_text_search".to_string())
+        .or_insert(Value::Null);
+    if is_dense_vector_type(&schema_type) {
+        config.insert("ann".to_string(), Value::Bool(true));
+    } else if attribute == "id" {
+        config.remove("ann");
     }
     Ok((attribute.to_string(), Value::Object(config)))
 }
@@ -2027,6 +2093,54 @@ fn fts_config_for_field(namespace: &Namespace, field: &str) -> FtsConfig {
         .ok()
         .flatten()
         .unwrap_or_default()
+}
+
+fn fts_config_schema_value(config: &FtsConfig) -> Value {
+    json!({
+        "k1": config.k1(),
+        "b": config.b(),
+        "k3": config.k3(),
+        "language": fts_language_name(config.language),
+        "stemming": config.stemming,
+        "remove_stopwords": config.remove_stopwords,
+        "ascii_folding": config.ascii_folding,
+        "case_sensitive": config.case_sensitive,
+        "max_token_length": config.max_token_length,
+        "tokenizer": tokenizer_name(config.tokenizer),
+    })
+}
+
+fn fts_language_name(language: FtsLanguage) -> &'static str {
+    match language {
+        FtsLanguage::Arabic => "arabic",
+        FtsLanguage::Danish => "danish",
+        FtsLanguage::Dutch => "dutch",
+        FtsLanguage::English => "english",
+        FtsLanguage::Finnish => "finnish",
+        FtsLanguage::French => "french",
+        FtsLanguage::German => "german",
+        FtsLanguage::Greek => "greek",
+        FtsLanguage::Hungarian => "hungarian",
+        FtsLanguage::Italian => "italian",
+        FtsLanguage::Norwegian => "norwegian",
+        FtsLanguage::Portuguese => "portuguese",
+        FtsLanguage::Romanian => "romanian",
+        FtsLanguage::Russian => "russian",
+        FtsLanguage::Spanish => "spanish",
+        FtsLanguage::Swedish => "swedish",
+        FtsLanguage::Tamil => "tamil",
+        FtsLanguage::Turkish => "turkish",
+    }
+}
+
+fn tokenizer_name(tokenizer: Tokenizer) -> &'static str {
+    match tokenizer {
+        Tokenizer::PreTokenizedArray => "pre_tokenized_array",
+        Tokenizer::WordV0 => "word_v0",
+        Tokenizer::WordV1 => "word_v1",
+        Tokenizer::WordV2 => "word_v2",
+        Tokenizer::WordV3 => "word_v3",
+    }
 }
 
 fn fts_config_from_schema(schema: Option<&Map<String, Value>>, field: &str) -> FtsConfig {
