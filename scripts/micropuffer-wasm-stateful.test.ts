@@ -2,6 +2,7 @@ import { expect, test } from "vitest";
 import {
   type JsonObject,
   type JsonValue,
+  isJsonObject,
   parseJsonObject
 } from "./test-utils";
 import {
@@ -10,8 +11,9 @@ import {
 
 const namespaceName = "micropuffer-stateful-wasm-test";
 
-test("stateful wasm engine owns query/write state in wasm memory", () => {
+test("stateful wasm engine owns query/write state in wasm memory", async () => {
   const engine = new Micropuffer();
+  const ns = engine.namespace(namespaceName);
   const writeRequest: JsonObject = {
     distance_metric: "cosine_distance",
     schema: {
@@ -36,7 +38,7 @@ test("stateful wasm engine owns query/write state in wasm memory", () => {
     ]
   };
 
-  const write = parseJsonObject(engine.write(namespaceName, json(writeRequest)), "write response");
+  const write = expectJsonObject(await ns.write(writeRequest), "write response");
   expect(write.rows_upserted).toBe(2);
 
   const queryRequest: JsonObject = {
@@ -44,16 +46,13 @@ test("stateful wasm engine owns query/write state in wasm memory", () => {
     limit: 1,
     include_attributes: ["title", "score"]
   };
-  const query = parseJsonObject(engine.query(namespaceName, json(queryRequest)), "query response");
+  const query = expectJsonObject(await ns.query(queryRequest), "query response");
   expect(query.rows).toStrictEqual([{ "$dist": 0, id: 1, score: 10, title: "walrus field notes" }]);
 
-  const metadata = parseJsonObject(engine.metadata(namespaceName), "metadata response");
+  const metadata = expectJsonObject(await ns.metadata(), "metadata response");
   expect(metadata.approx_row_count).toBe(2);
 
-  const exported = parseJsonObject(
-    engine.exportNamespace(namespaceName, json({ limit: 10 })),
-    "namespace export response"
-  );
+  const exported = expectJsonObject(await ns.export({ limit: 10 }), "namespace export response");
   expect(exported.ids).toStrictEqual([1, 2]);
   expect(exported.vectors).toStrictEqual([[1, 0], [0, 1]]);
   expect(exported.attributes).toStrictEqual({
@@ -62,11 +61,8 @@ test("stateful wasm engine owns query/write state in wasm memory", () => {
     title: ["walrus field notes", "reef fish field notes"]
   });
 
-  const invalidProjection = parseJsonObject(
-    engine.queryResponse(
-      namespaceName,
-      json({ rank_by: ["id", "asc"], limit: 1, exclude_attributes: true })
-    ),
+  const invalidProjection = expectJsonObject(
+    await ns.queryResponse({ rank_by: ["id", "asc"], limit: 1, exclude_attributes: true }),
     "query response envelope"
   );
   expect(invalidProjection.status).toBe(422);
@@ -76,11 +72,10 @@ test("stateful wasm engine owns query/write state in wasm memory", () => {
   });
 
   const replacement = Micropuffer.fromStore(engine.exportStore());
+  const replacementNs = replacement.namespace(namespaceName);
   expect(
-    parseJsonObject(replacement.query(namespaceName, json(queryRequest)), "replacement query")
-  ).toStrictEqual(
-    parseJsonObject(engine.query(namespaceName, json(queryRequest)), "original query")
-  );
+    expectJsonObject(await replacementNs.query(queryRequest), "replacement query")
+  ).toStrictEqual(expectJsonObject(await ns.query(queryRequest), "original query"));
 
   replacement.replaceStore(json({ namespaces: [] }));
   expect(parseJsonObject(replacement.listNamespaces(json({})), "empty namespace list")).toStrictEqual({
@@ -128,8 +123,9 @@ test("repeated stateful queries keep full store JSON out of the call loop", () =
   );
 });
 
-test("response methods expose HTTP-style status envelopes", () => {
+test("response methods expose HTTP-style status envelopes", async () => {
   const engine = new Micropuffer();
+  const ns = engine.namespace("quickstart-response-test");
 
   const missingMetadata = parseJsonObject(
     engine.metadataResponse("missing"),
@@ -152,20 +148,17 @@ test("response methods expose HTTP-style status envelopes", () => {
     body: "Invalid URL: Namespace contains invalid characters, must be [A-Za-z0-9-_.]"
   });
 
-  const write = parseJsonObject(
-    engine.writeResponse(
-      "local",
-      json({ distance_metric: "cosine_distance", upsert_rows: [{ id: 1, vector: [1, 0] }] })
-    ),
+  const write = expectJsonObject(
+    await ns.writeResponse({
+      distance_metric: "cosine_distance",
+      upsert_rows: [{ id: 1, vector: [1, 0] }]
+    }),
     "write response envelope"
   );
   expect(write.status).toBe(200);
   expect(write.body).toMatchObject({ status: "OK", rows_affected: 1, rows_upserted: 1 });
 
-  const warmCache = parseJsonObject(
-    engine.warmCacheResponse("local"),
-    "warm cache response envelope"
-  );
+  const warmCache = expectJsonObject(await ns.warmCacheResponse(), "warm cache response envelope");
   expect(warmCache).toStrictEqual({
     status: 202,
     body: {
@@ -174,21 +167,15 @@ test("response methods expose HTTP-style status envelopes", () => {
     }
   });
 
-  const deleteOk = parseJsonObject(
-    engine.deleteNamespaceResponse("local"),
-    "delete response envelope"
-  );
+  const deleteOk = expectJsonObject(await ns.deleteResponse(), "delete response envelope");
   expect(deleteOk).toStrictEqual({ status: 200, body: { status: "OK" } });
 
-  const deleteMissing = parseJsonObject(
-    engine.deleteNamespaceResponse("local"),
-    "missing delete response envelope"
-  );
+  const deleteMissing = expectJsonObject(await ns.deleteResponse(), "missing delete response envelope");
   expect(deleteMissing).toStrictEqual({
     status: 404,
     body: {
       status: "error",
-      error: "🤷 namespace 'local' was not found"
+      error: "🤷 namespace 'quickstart-response-test' was not found"
     }
   });
 });
@@ -211,4 +198,11 @@ function seedEngine(rowCount: number): Micropuffer {
 
 function json(value: JsonValue): string {
   return JSON.stringify(value);
+}
+
+function expectJsonObject(value: unknown, label: string): JsonObject {
+  if (!isJsonObject(value)) {
+    throw new Error(`${label} was not a JSON object.`);
+  }
+  return value;
 }

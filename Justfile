@@ -26,6 +26,7 @@ wasm-target:
 wasm: wasm-target
     cargo build --lib --target wasm32-unknown-unknown --release
     wasm-bindgen --target bundler --out-dir pkg --out-name micropuffer target/wasm32-unknown-unknown/release/micropuffer.wasm
+    node scripts/build-package.mjs
 
 clean-generated:
     rm -rf pkg
