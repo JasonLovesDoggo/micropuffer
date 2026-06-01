@@ -274,6 +274,75 @@ struct RankPlan<'a> {
 }
 
 #[derive(Debug, Clone)]
+struct PreparedRankPlan<'a> {
+    kind: RankKind,
+    expression: Option<PreparedRankExpr<'a>>,
+}
+
+#[derive(Debug, Clone)]
+enum PreparedRankExpr<'a> {
+    Literal(f64),
+    Sum(Vec<PreparedRankExpr<'a>>),
+    Max(Vec<PreparedRankExpr<'a>>),
+    Product {
+        weight: f64,
+        expression: Box<PreparedRankExpr<'a>>,
+    },
+    Attribute(&'a str),
+    Saturate {
+        expression: Box<PreparedRankExpr<'a>>,
+        midpoint: f64,
+        exponent: f64,
+    },
+    Decay {
+        expression: Box<PreparedRankExpr<'a>>,
+        midpoint: f64,
+        exponent: f64,
+    },
+    Dist {
+        expression: PreparedDistExpr<'a>,
+        origin: &'a Value,
+    },
+    DenseDistance {
+        attribute: &'a str,
+        query: PreparedDenseQuery,
+    },
+    SparseDotProduct {
+        attribute: &'a str,
+        query: HashMap<String, f64>,
+    },
+    Bm25 {
+        field: &'a str,
+        query: Option<PreparedBm25Query>,
+    },
+    Filter(&'a Value),
+}
+
+#[derive(Debug, Clone)]
+enum PreparedDistExpr<'a> {
+    Attribute(&'a str),
+    Rank(Box<PreparedRankExpr<'a>>),
+}
+
+#[derive(Debug, Clone)]
+struct PreparedDenseQuery {
+    values: Vec<f64>,
+    norm: f64,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedBm25Query {
+    terms: Vec<PreparedBm25Term>,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedBm25Term {
+    token: String,
+    query_frequency: usize,
+    prefix: bool,
+}
+
+#[derive(Debug, Clone)]
 struct Bm25FieldStats {
     doc_count: usize,
     avg_len: f64,
@@ -805,16 +874,16 @@ fn query_single(
     let filters = object.get("filters");
     let rank_plan = parse_rank_plan(rank_by, filters.is_some())?;
     let bm25_stats = Bm25Stats::new(namespace);
-    let mut ranked = rank_documents(namespace, rank_plan.clone(), filters, &bm25_stats)?;
-    sort_ranked_documents(&mut ranked, rank_plan.kind.clone());
-    let ranked = apply_limit(ranked, &limit, rank_plan.kind.clone())?;
+    let prepared_rank_plan = prepare_rank_plan(rank_plan, &bm25_stats)?;
+    let ranked = rank_documents(namespace, &prepared_rank_plan, filters, &bm25_stats)?;
+    let ranked = apply_limit(ranked, &limit, &prepared_rank_plan.kind)?;
     let mut rows = Vec::with_capacity(ranked.len());
     for ranked_doc in ranked {
         rows.push(project_document(
             ranked_doc.doc,
             object,
             options.vector_encoding,
-            rank_plan.kind.clone(),
+            prepared_rank_plan.kind.clone(),
             ranked_doc.score,
         )?);
     }
@@ -2413,9 +2482,244 @@ fn rank_expression_kind(rank_by: &Value, has_filters: bool) -> Result<RankKind, 
     Ok(RankKind::LargerIsBetter)
 }
 
+fn prepare_rank_plan<'a>(
+    rank_plan: RankPlan<'a>,
+    bm25_stats: &Bm25Stats,
+) -> Result<PreparedRankPlan<'a>, QueryError> {
+    let expression = match rank_plan.kind {
+        RankKind::AttributeOrder { .. } | RankKind::MultiAttributeOrder { .. } => None,
+        RankKind::SmallerIsBetter | RankKind::LargerIsBetter => {
+            Some(prepare_rank_expr(rank_plan.rank_by, bm25_stats)?)
+        }
+    };
+    Ok(PreparedRankPlan {
+        kind: rank_plan.kind,
+        expression,
+    })
+}
+
+fn prepare_rank_expr<'a>(
+    expression: &'a Value,
+    bm25_stats: &Bm25Stats,
+) -> Result<PreparedRankExpr<'a>, QueryError> {
+    if let Some(number) = expression.as_f64() {
+        return Ok(PreparedRankExpr::Literal(number));
+    }
+    let array = as_array(expression, "rank expression")?;
+    if array.is_empty() {
+        return Err(QueryError::new("rank expression cannot be empty."));
+    }
+    if let Some(op) = array[0].as_str() {
+        match op {
+            "Sum" => return prepare_sum(array, bm25_stats),
+            "Max" => return prepare_max(array, bm25_stats),
+            "Product" => return prepare_product(array, bm25_stats),
+            "Attribute" => {
+                if array.len() != 2 {
+                    return Err(QueryError::new("Attribute requires one attribute name."));
+                }
+                return Ok(PreparedRankExpr::Attribute(as_string(
+                    &array[1],
+                    "Attribute name",
+                )?));
+            }
+            "Saturate" => return prepare_saturate(array, bm25_stats),
+            "Decay" => return prepare_decay(array, bm25_stats),
+            "Dist" => return prepare_dist(array, bm25_stats),
+            "And" | "Or" | "Not" => return Ok(PreparedRankExpr::Filter(expression)),
+            _ => {}
+        }
+    }
+    if array.len() >= 3 {
+        let attr = as_string(&array[0], "rank_by attribute")?;
+        let op = as_string(&array[1], "rank_by operator")?;
+        return match op {
+            "ANN" | "kNN" => {
+                let values = numeric_array(&array[2], "query vector")?;
+                let norm = vector_norm(&values);
+                Ok(PreparedRankExpr::DenseDistance {
+                    attribute: attr,
+                    query: PreparedDenseQuery { values, norm },
+                })
+            }
+            "SparseKNN" => Ok(PreparedRankExpr::SparseDotProduct {
+                attribute: attr,
+                query: sparse_map(&array[2], "query sparse vector")?,
+            }),
+            "BM25" => Ok(PreparedRankExpr::Bm25 {
+                field: attr,
+                query: prepare_bm25_query(attr, &array[2], array.get(3), bm25_stats)?,
+            }),
+            _ => Ok(PreparedRankExpr::Filter(expression)),
+        };
+    }
+    Err(QueryError::new("unsupported rank expression."))
+}
+
+fn prepare_sum<'a>(
+    array: &'a [Value],
+    bm25_stats: &Bm25Stats,
+) -> Result<PreparedRankExpr<'a>, QueryError> {
+    let terms = array
+        .get(1)
+        .ok_or_else(|| QueryError::new("Sum requires terms."))?;
+    let terms = as_array(terms, "Sum terms")?
+        .iter()
+        .map(|term| prepare_rank_expr(term, bm25_stats))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(PreparedRankExpr::Sum(terms))
+}
+
+fn prepare_max<'a>(
+    array: &'a [Value],
+    bm25_stats: &Bm25Stats,
+) -> Result<PreparedRankExpr<'a>, QueryError> {
+    let terms = if array.len() == 2 {
+        as_array(&array[1], "Max terms")?.iter().collect::<Vec<_>>()
+    } else {
+        array.iter().skip(1).collect::<Vec<_>>()
+    };
+    Ok(PreparedRankExpr::Max(
+        terms
+            .into_iter()
+            .map(|term| prepare_rank_expr(term, bm25_stats))
+            .collect::<Result<Vec<_>, _>>()?,
+    ))
+}
+
+fn prepare_product<'a>(
+    array: &'a [Value],
+    bm25_stats: &Bm25Stats,
+) -> Result<PreparedRankExpr<'a>, QueryError> {
+    if array.len() != 3 {
+        return Err(QueryError::new(
+            "Product requires a weight and an expression.",
+        ));
+    }
+    let weight = array[1]
+        .as_f64()
+        .ok_or_else(|| QueryError::new("Product weight must be numeric."))?;
+    if weight < 0.0 {
+        return Err(QueryError::new("Product weight must be non-negative."));
+    }
+    Ok(PreparedRankExpr::Product {
+        weight,
+        expression: Box::new(prepare_rank_expr(&array[2], bm25_stats)?),
+    })
+}
+
+fn prepare_saturate<'a>(
+    array: &'a [Value],
+    bm25_stats: &Bm25Stats,
+) -> Result<PreparedRankExpr<'a>, QueryError> {
+    if array.len() < 2 {
+        return Err(QueryError::new("Saturate requires an expression."));
+    }
+    let options = array.get(2).and_then(Value::as_object);
+    Ok(PreparedRankExpr::Saturate {
+        expression: Box::new(prepare_rank_expr(&array[1], bm25_stats)?),
+        midpoint: options
+            .and_then(|object| object.get("midpoint"))
+            .and_then(value_as_f64)
+            .unwrap_or(1.0),
+        exponent: options
+            .and_then(|object| object.get("exponent"))
+            .and_then(value_as_f64)
+            .unwrap_or(1.0),
+    })
+}
+
+fn prepare_decay<'a>(
+    array: &'a [Value],
+    bm25_stats: &Bm25Stats,
+) -> Result<PreparedRankExpr<'a>, QueryError> {
+    if array.len() < 2 {
+        return Err(QueryError::new("Decay requires an expression."));
+    }
+    let options = array.get(2).and_then(Value::as_object);
+    Ok(PreparedRankExpr::Decay {
+        expression: Box::new(prepare_rank_expr(&array[1], bm25_stats)?),
+        midpoint: options
+            .and_then(|object| object.get("midpoint"))
+            .map(parse_midpoint)
+            .transpose()?
+            .unwrap_or(1.0),
+        exponent: options
+            .and_then(|object| object.get("exponent"))
+            .and_then(value_as_f64)
+            .unwrap_or(1.0),
+    })
+}
+
+fn prepare_dist<'a>(
+    array: &'a [Value],
+    bm25_stats: &Bm25Stats,
+) -> Result<PreparedRankExpr<'a>, QueryError> {
+    if array.len() != 3 {
+        return Err(QueryError::new(
+            "Dist requires an expression and an origin.",
+        ));
+    }
+    let expression = if let Some(attribute_expr) = array[1].as_array() {
+        if attribute_expr.first().and_then(Value::as_str) == Some("Attribute") {
+            let attr = attribute_expr
+                .get(1)
+                .and_then(Value::as_str)
+                .ok_or_else(|| QueryError::new("Dist Attribute requires a name."))?;
+            PreparedDistExpr::Attribute(attr)
+        } else {
+            PreparedDistExpr::Rank(Box::new(prepare_rank_expr(&array[1], bm25_stats)?))
+        }
+    } else {
+        PreparedDistExpr::Rank(Box::new(prepare_rank_expr(&array[1], bm25_stats)?))
+    };
+    Ok(PreparedRankExpr::Dist {
+        expression,
+        origin: &array[2],
+    })
+}
+
+fn prepare_bm25_query(
+    field: &str,
+    query: &Value,
+    options: Option<&Value>,
+    stats: &Bm25Stats,
+) -> Result<Option<PreparedBm25Query>, QueryError> {
+    let field_stats = match stats.fields.get(field) {
+        Some(stats) if stats.doc_count > 0 && stats.avg_len > 0.0 => stats,
+        _ => return Ok(None),
+    };
+    let query_tokens = query_tokens_with_config(query, "BM25 query", &field_stats.config)?;
+    if query_tokens.is_empty() {
+        return Ok(Some(PreparedBm25Query { terms: Vec::new() }));
+    }
+    let last_as_prefix = options
+        .and_then(Value::as_object)
+        .and_then(|object| object.get("last_as_prefix"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut query_term_counts: HashMap<&String, usize> = HashMap::new();
+    for token in &query_tokens {
+        let count = query_term_counts.entry(token).or_insert(0);
+        *count += 1;
+    }
+    let mut terms = Vec::new();
+    for (index, token) in query_tokens.iter().enumerate() {
+        if query_tokens[..index].contains(token) {
+            continue;
+        }
+        terms.push(PreparedBm25Term {
+            token: token.clone(),
+            query_frequency: query_term_counts.get(token).copied().unwrap_or(1),
+            prefix: last_as_prefix && index + 1 == query_tokens.len(),
+        });
+    }
+    Ok(Some(PreparedBm25Query { terms }))
+}
+
 fn rank_documents<'a>(
     namespace: &'a Namespace,
-    rank_plan: RankPlan<'a>,
+    rank_plan: &PreparedRankPlan<'_>,
     filters: Option<&Value>,
     bm25_stats: &Bm25Stats,
 ) -> Result<Vec<RankedDocument<'a>>, QueryError> {
@@ -2430,9 +2734,12 @@ fn rank_documents<'a>(
         }
         let score = match rank_plan.kind {
             RankKind::AttributeOrder { .. } | RankKind::MultiAttributeOrder { .. } => 0.0,
-            RankKind::SmallerIsBetter | RankKind::LargerIsBetter => eval_rank_expr(
+            RankKind::SmallerIsBetter | RankKind::LargerIsBetter => eval_prepared_rank_expr(
                 document,
-                rank_plan.rank_by,
+                rank_plan
+                    .expression
+                    .as_ref()
+                    .ok_or_else(|| QueryError::new("rank expression was not prepared."))?,
                 bm25_stats,
                 namespace.distance_metric,
             )?,
@@ -2453,22 +2760,30 @@ fn rank_documents<'a>(
     Ok(ranked)
 }
 
-fn sort_ranked_documents(ranked: &mut [RankedDocument<'_>], kind: RankKind) {
-    ranked.sort_by(|left, right| match kind {
+fn sort_ranked_documents(ranked: &mut [RankedDocument<'_>], kind: &RankKind) {
+    ranked.sort_by(|left, right| ranked_document_order(left, right, kind));
+}
+
+fn ranked_document_order(
+    left: &RankedDocument<'_>,
+    right: &RankedDocument<'_>,
+    kind: &RankKind,
+) -> Ordering {
+    match kind {
         RankKind::SmallerIsBetter => compare_f64(left.score, right.score)
             .then_with(|| stable_id_compare(&left.doc.id, &right.doc.id)),
         RankKind::LargerIsBetter => compare_f64(right.score, left.score)
             .then_with(|| stable_id_compare(&left.doc.id, &right.doc.id)),
         RankKind::AttributeOrder {
-            ref attribute,
+            attribute,
             direction,
-        } => compare_order_attr(left.doc, right.doc, attribute, direction)
+        } => compare_order_attr(left.doc, right.doc, attribute, *direction)
             .then_with(|| stable_id_compare(&left.doc.id, &right.doc.id)),
-        RankKind::MultiAttributeOrder { ref attributes } => {
+        RankKind::MultiAttributeOrder { attributes } => {
             compare_order_attrs(left.doc, right.doc, attributes)
                 .then_with(|| stable_id_compare(&left.doc.id, &right.doc.id))
         }
-    });
+    }
 }
 
 fn compare_order_attr(
@@ -2496,38 +2811,19 @@ fn compare_order_attrs(
         .unwrap_or(Ordering::Equal)
 }
 
-fn sort_ranked_by_attribute(
-    ranked: &mut [RankedDocument<'_>],
-    attr: &str,
-    direction: SortDirection,
-) {
-    ranked.sort_by(|left, right| {
-        let base = compare_values_for_order(
-            document_attr(left.doc, attr),
-            document_attr(right.doc, attr),
-        );
-        let directed = match direction {
-            SortDirection::Asc => base,
-            SortDirection::Desc => base.reverse(),
-        };
-        directed.then_with(|| stable_id_compare(&left.doc.id, &right.doc.id))
-    });
-}
-
 fn apply_limit<'a>(
     mut ranked: Vec<RankedDocument<'a>>,
     limit: &Limit,
-    kind: RankKind,
+    kind: &RankKind,
 ) -> Result<Vec<RankedDocument<'a>>, QueryError> {
-    if let RankKind::AttributeOrder {
-        ref attribute,
-        direction,
-    } = kind
-    {
-        sort_ranked_by_attribute(&mut ranked, attribute, direction);
-    }
     let Some(per) = &limit.per else {
+        if ranked.len() > limit.total {
+            ranked.select_nth_unstable_by(limit.total, |left, right| {
+                ranked_document_order(left, right, kind)
+            });
+        }
         ranked.truncate(limit.total);
+        sort_ranked_documents(&mut ranked, kind);
         return Ok(ranked);
     };
     if !matches!(
@@ -2538,6 +2834,7 @@ fn apply_limit<'a>(
             "limit.per is only supported for order by attribute queries.",
         ));
     }
+    sort_ranked_documents(&mut ranked, kind);
     let mut seen: BTreeMap<String, usize> = BTreeMap::new();
     let mut result = Vec::new();
     for ranked_doc in ranked {
@@ -2564,214 +2861,93 @@ fn apply_limit<'a>(
     Ok(result)
 }
 
-fn eval_rank_expr(
+fn eval_prepared_rank_expr(
     document: &Document,
-    expression: &Value,
+    expression: &PreparedRankExpr<'_>,
     bm25_stats: &Bm25Stats,
     distance_metric: DistanceMetric,
 ) -> Result<f64, QueryError> {
-    let array = as_array(expression, "rank expression")?;
-    if array.is_empty() {
-        return Err(QueryError::new("rank expression cannot be empty."));
-    }
-    if let Some(op) = array[0].as_str() {
-        match op {
-            "Sum" => return eval_sum(document, array, bm25_stats, distance_metric),
-            "Max" => return eval_max(document, array, bm25_stats, distance_metric),
-            "Product" => return eval_product(document, array, bm25_stats, distance_metric),
-            "Attribute" => return eval_attribute_score(document, array),
-            "Saturate" => return eval_saturate(document, array, bm25_stats, distance_metric),
-            "Decay" => return eval_decay(document, array, bm25_stats, distance_metric),
-            "Dist" => return eval_dist(document, array, bm25_stats, distance_metric),
-            "And" | "Or" | "Not" => {
-                return Ok(if eval_filter(document, expression)? {
-                    1.0
-                } else {
-                    0.0
-                });
+    match expression {
+        PreparedRankExpr::Literal(value) => Ok(*value),
+        PreparedRankExpr::Sum(terms) => {
+            let mut total = 0.0;
+            for term in terms {
+                total += eval_prepared_rank_expr(document, term, bm25_stats, distance_metric)?;
             }
-            _ => {}
+            Ok(total)
         }
-    }
-    if array.len() >= 3 {
-        let attr = as_string(&array[0], "rank_by attribute")?;
-        let op = as_string(&array[1], "rank_by operator")?;
-        return match op {
-            "ANN" | "kNN" => dense_distance(document, attr, &array[2], distance_metric),
-            "SparseKNN" => sparse_dot_product(document, attr, &array[2]),
-            "BM25" => bm25_score(document, attr, &array[2], array.get(3), bm25_stats),
-            _ => Ok(if eval_filter(document, expression)? {
-                1.0
-            } else {
-                0.0
-            }),
-        };
-    }
-    Err(QueryError::new("unsupported rank expression."))
-}
-
-fn eval_sum(
-    document: &Document,
-    array: &[Value],
-    bm25_stats: &Bm25Stats,
-    distance_metric: DistanceMetric,
-) -> Result<f64, QueryError> {
-    let terms = array
-        .get(1)
-        .ok_or_else(|| QueryError::new("Sum requires terms."))?;
-    let terms = as_array(terms, "Sum terms")?;
-    let mut total = 0.0;
-    for term in terms {
-        total += eval_rank_expr(document, term, bm25_stats, distance_metric)?;
-    }
-    Ok(total)
-}
-
-fn eval_max(
-    document: &Document,
-    array: &[Value],
-    bm25_stats: &Bm25Stats,
-    distance_metric: DistanceMetric,
-) -> Result<f64, QueryError> {
-    let terms: Vec<&Value> = if array.len() == 2 {
-        as_array(&array[1], "Max terms")?.iter().collect()
-    } else {
-        array.iter().skip(1).collect()
-    };
-    let mut best = 0.0;
-    for term in terms {
-        let score = if let Some(number) = term.as_f64() {
-            number
+        PreparedRankExpr::Max(terms) => {
+            let mut best = 0.0;
+            for term in terms {
+                let score = eval_prepared_rank_expr(document, term, bm25_stats, distance_metric)?;
+                if score > best {
+                    best = score;
+                }
+            }
+            Ok(best)
+        }
+        PreparedRankExpr::Product { weight, expression } => {
+            Ok(*weight
+                * eval_prepared_rank_expr(document, expression, bm25_stats, distance_metric)?)
+        }
+        PreparedRankExpr::Attribute(attribute) => Ok(document_attr(document, attribute)
+            .and_then(value_as_f64)
+            .unwrap_or(0.0)),
+        PreparedRankExpr::Saturate {
+            expression,
+            midpoint,
+            exponent,
+        } => {
+            let score = eval_prepared_rank_expr(document, expression, bm25_stats, distance_metric)?
+                .max(0.0);
+            if score <= 0.0 || *midpoint <= 0.0 || *exponent <= 0.0 {
+                return Ok(0.0);
+            }
+            let powered = score.powf(*exponent);
+            Ok(powered / (powered + midpoint.powf(*exponent)))
+        }
+        PreparedRankExpr::Decay {
+            expression,
+            midpoint,
+            exponent,
+        } => {
+            let distance =
+                eval_prepared_rank_expr(document, expression, bm25_stats, distance_metric)?.abs();
+            if *midpoint <= 0.0 || *exponent <= 0.0 {
+                return Ok(0.0);
+            }
+            let midpoint = midpoint.powf(*exponent);
+            Ok(midpoint / (distance.powf(*exponent) + midpoint))
+        }
+        PreparedRankExpr::Dist { expression, origin } => {
+            let value = match expression {
+                PreparedDistExpr::Attribute(attribute) => document_attr(document, attribute)
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                PreparedDistExpr::Rank(expression) => number_value(eval_prepared_rank_expr(
+                    document,
+                    expression,
+                    bm25_stats,
+                    distance_metric,
+                )?),
+            };
+            numeric_or_datetime_distance(&value, origin)
+        }
+        PreparedRankExpr::DenseDistance { attribute, query } => {
+            dense_distance_to_query(document, attribute, query, distance_metric)
+        }
+        PreparedRankExpr::SparseDotProduct { attribute, query } => {
+            sparse_dot_product_with_query(document, attribute, query)
+        }
+        PreparedRankExpr::Bm25 { field, query } => {
+            bm25_score_with_query(document, field, query.as_ref(), bm25_stats)
+        }
+        PreparedRankExpr::Filter(filter) => Ok(if eval_filter(document, filter)? {
+            1.0
         } else {
-            eval_rank_expr(document, term, bm25_stats, distance_metric)?
-        };
-        if score > best {
-            best = score;
-        }
+            0.0
+        }),
     }
-    Ok(best)
-}
-
-fn eval_product(
-    document: &Document,
-    array: &[Value],
-    bm25_stats: &Bm25Stats,
-    distance_metric: DistanceMetric,
-) -> Result<f64, QueryError> {
-    if array.len() != 3 {
-        return Err(QueryError::new(
-            "Product requires a weight and an expression.",
-        ));
-    }
-    let weight = array[1]
-        .as_f64()
-        .ok_or_else(|| QueryError::new("Product weight must be numeric."))?;
-    if weight < 0.0 {
-        return Err(QueryError::new("Product weight must be non-negative."));
-    }
-    Ok(weight * eval_rank_expr(document, &array[2], bm25_stats, distance_metric)?)
-}
-
-fn eval_attribute_score(document: &Document, array: &[Value]) -> Result<f64, QueryError> {
-    if array.len() != 2 {
-        return Err(QueryError::new("Attribute requires one attribute name."));
-    }
-    let attr = as_string(&array[1], "Attribute name")?;
-    Ok(document_attr(document, attr)
-        .and_then(value_as_f64)
-        .unwrap_or(0.0))
-}
-
-fn eval_saturate(
-    document: &Document,
-    array: &[Value],
-    bm25_stats: &Bm25Stats,
-    distance_metric: DistanceMetric,
-) -> Result<f64, QueryError> {
-    if array.len() < 2 {
-        return Err(QueryError::new("Saturate requires an expression."));
-    }
-    let score = eval_rank_expr(document, &array[1], bm25_stats, distance_metric)?.max(0.0);
-    let options = array.get(2).and_then(Value::as_object);
-    let midpoint = options
-        .and_then(|object| object.get("midpoint"))
-        .and_then(value_as_f64)
-        .unwrap_or(1.0);
-    let exponent = options
-        .and_then(|object| object.get("exponent"))
-        .and_then(value_as_f64)
-        .unwrap_or(1.0);
-    if score <= 0.0 || midpoint <= 0.0 || exponent <= 0.0 {
-        return Ok(0.0);
-    }
-    let powered = score.powf(exponent);
-    Ok(powered / (powered + midpoint.powf(exponent)))
-}
-
-fn eval_decay(
-    document: &Document,
-    array: &[Value],
-    bm25_stats: &Bm25Stats,
-    distance_metric: DistanceMetric,
-) -> Result<f64, QueryError> {
-    if array.len() < 2 {
-        return Err(QueryError::new("Decay requires an expression."));
-    }
-    let distance = eval_rank_expr(document, &array[1], bm25_stats, distance_metric)?.abs();
-    let options = array.get(2).and_then(Value::as_object);
-    let midpoint = options
-        .and_then(|object| object.get("midpoint"))
-        .map(parse_midpoint)
-        .transpose()?
-        .unwrap_or(1.0);
-    let exponent = options
-        .and_then(|object| object.get("exponent"))
-        .and_then(value_as_f64)
-        .unwrap_or(1.0);
-    if midpoint <= 0.0 || exponent <= 0.0 {
-        return Ok(0.0);
-    }
-    let midpoint = midpoint.powf(exponent);
-    Ok(midpoint / (distance.powf(exponent) + midpoint))
-}
-
-fn eval_dist(
-    document: &Document,
-    array: &[Value],
-    bm25_stats: &Bm25Stats,
-    distance_metric: DistanceMetric,
-) -> Result<f64, QueryError> {
-    if array.len() != 3 {
-        return Err(QueryError::new(
-            "Dist requires an expression and an origin.",
-        ));
-    }
-    let value = if let Some(attribute_expr) = array[1].as_array() {
-        if attribute_expr.first().and_then(Value::as_str) == Some("Attribute") {
-            let attr = attribute_expr
-                .get(1)
-                .and_then(Value::as_str)
-                .ok_or_else(|| QueryError::new("Dist Attribute requires a name."))?;
-            document_attr(document, attr)
-                .cloned()
-                .unwrap_or(Value::Null)
-        } else {
-            number_value(eval_rank_expr(
-                document,
-                &array[1],
-                bm25_stats,
-                distance_metric,
-            )?)
-        }
-    } else {
-        number_value(eval_rank_expr(
-            document,
-            &array[1],
-            bm25_stats,
-            distance_metric,
-        )?)
-    };
-    numeric_or_datetime_distance(&value, &array[2])
 }
 
 fn dense_distance(
@@ -2818,37 +2994,148 @@ fn dense_distance(
     }
 }
 
-fn sparse_dot_product(document: &Document, attr: &str, query: &Value) -> Result<f64, QueryError> {
-    let doc_vector = document
+fn dense_distance_to_query(
+    document: &Document,
+    attr: &str,
+    query: &PreparedDenseQuery,
+    distance_metric: DistanceMetric,
+) -> Result<f64, QueryError> {
+    let left = document
         .attributes
         .get(attr)
-        .map(|value| sparse_map(value, attr))
-        .transpose()?
-        .unwrap_or_default();
-    let query_vector = sparse_map(query, "query sparse vector")?;
+        .ok_or_else(|| QueryError::new(format!("Vector attribute '{attr}' is missing.")))?;
+    if let Some(encoded) = left.as_str() {
+        let bytes = STANDARD
+            .decode(encoded)
+            .map_err(|error| QueryError::new(format!("{attr} base64 is invalid: {error}")))?;
+        if bytes.len() % std::mem::size_of::<f32>() != 0 {
+            return Err(QueryError::new(format!(
+                "{attr} base64 length must be a multiple of 4 bytes."
+            )));
+        }
+        let document_len = bytes.len() / std::mem::size_of::<f32>();
+        if document_len != query.values.len() {
+            return Err(QueryError::new(format!(
+                "Vector dimension mismatch for '{attr}': document has {}, query has {}.",
+                document_len,
+                query.values.len()
+            )));
+        }
+        return Ok(dense_distance_f32_chunks(&bytes, query, distance_metric));
+    }
+    let values = as_array(left, attr)?;
+    if values.len() != query.values.len() {
+        return Err(QueryError::new(format!(
+            "Vector dimension mismatch for '{attr}': document has {}, query has {}.",
+            values.len(),
+            query.values.len()
+        )));
+    }
+    let mut dot = 0.0;
+    let mut norm = 0.0;
+    let mut distance = 0.0;
+    for (index, (doc_value, query_value)) in values.iter().zip(query.values.iter()).enumerate() {
+        let doc_value = value_as_f64(doc_value)
+            .ok_or_else(|| QueryError::new(format!("{attr}[{index}] must be numeric.")))?;
+        match distance_metric {
+            DistanceMetric::EuclideanSquared => {
+                let delta = doc_value - query_value;
+                distance += delta * delta;
+            }
+            DistanceMetric::CosineDistance => {
+                dot += doc_value * query_value;
+                norm += doc_value * doc_value;
+            }
+        }
+    }
+    match distance_metric {
+        DistanceMetric::EuclideanSquared => Ok(distance),
+        DistanceMetric::CosineDistance => {
+            let norm = norm.sqrt();
+            if norm == 0.0 || query.norm == 0.0 {
+                return Ok(1.0);
+            }
+            Ok(1.0 - dot / (norm * query.norm))
+        }
+    }
+}
+
+fn dense_distance_f32_chunks(
+    bytes: &[u8],
+    query: &PreparedDenseQuery,
+    distance_metric: DistanceMetric,
+) -> f64 {
+    let mut dot = 0.0;
+    let mut norm = 0.0;
+    let mut distance = 0.0;
+    for (chunk, query_value) in bytes
+        .chunks_exact(std::mem::size_of::<f32>())
+        .zip(query.values.iter())
+    {
+        let doc_value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as f64;
+        match distance_metric {
+            DistanceMetric::EuclideanSquared => {
+                let delta = doc_value - query_value;
+                distance += delta * delta;
+            }
+            DistanceMetric::CosineDistance => {
+                dot += doc_value * query_value;
+                norm += doc_value * doc_value;
+            }
+        }
+    }
+    match distance_metric {
+        DistanceMetric::EuclideanSquared => distance,
+        DistanceMetric::CosineDistance => {
+            let norm = norm.sqrt();
+            if norm == 0.0 || query.norm == 0.0 {
+                return 1.0;
+            }
+            1.0 - dot / (norm * query.norm)
+        }
+    }
+}
+
+fn vector_norm(values: &[f64]) -> f64 {
+    values.iter().map(|value| value * value).sum::<f64>().sqrt()
+}
+
+fn sparse_dot_product_with_query(
+    document: &Document,
+    attr: &str,
+    query_vector: &HashMap<String, f64>,
+) -> Result<f64, QueryError> {
+    let Some(value) = document.attributes.get(attr) else {
+        return Ok(0.0);
+    };
+    let object = as_object(value, attr)?;
     let mut score = 0.0;
-    for (key, query_value) in query_vector {
-        let doc_value = doc_vector.get(&key).copied().unwrap_or(0.0);
-        score += doc_value * query_value;
+    for (key, value) in object {
+        let doc_value = value_as_f64(value)
+            .ok_or_else(|| QueryError::new(format!("{attr} value for '{key}' must be numeric.")))?;
+        if let Some(query_value) = query_vector.get(key) {
+            score += doc_value * query_value;
+        }
     }
     Ok(score)
 }
 
-fn bm25_score(
+fn bm25_score_with_query(
     document: &Document,
     field: &str,
-    query: &Value,
-    options: Option<&Value>,
+    query: Option<&PreparedBm25Query>,
     stats: &Bm25Stats,
 ) -> Result<f64, QueryError> {
+    let Some(query) = query else {
+        return Ok(0.0);
+    };
+    if query.terms.is_empty() {
+        return Ok(0.0);
+    }
     let field_stats = match stats.fields.get(field) {
         Some(stats) if stats.doc_count > 0 && stats.avg_len > 0.0 => stats,
         _ => return Ok(0.0),
     };
-    let query_tokens = query_tokens_with_config(query, "BM25 query", &field_stats.config)?;
-    if query_tokens.is_empty() {
-        return Ok(0.0);
-    }
     let document_tokens = string_attr_tokens_with_config(document, field, &field_stats.config);
     if document_tokens.is_empty() {
         return Ok(0.0);
@@ -2858,35 +3145,21 @@ fn bm25_score(
         let count = term_counts.entry(token.clone()).or_insert(0);
         *count += 1;
     }
-    let last_as_prefix = options
-        .and_then(Value::as_object)
-        .and_then(|object| object.get("last_as_prefix"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
     let mut score = 0.0;
-    let mut query_term_counts: HashMap<&String, usize> = HashMap::new();
-    for token in &query_tokens {
-        let count = query_term_counts.entry(token).or_insert(0);
-        *count += 1;
-    }
-    for (index, token) in query_tokens.iter().enumerate() {
-        if query_tokens[..index].contains(token) {
-            continue;
-        }
-        let prefix = last_as_prefix && index + 1 == query_tokens.len();
-        if prefix {
+    for term in &query.terms {
+        if term.prefix {
             if document_tokens
                 .iter()
-                .any(|doc_token| doc_token.starts_with(token))
+                .any(|doc_token| doc_token.starts_with(&term.token))
             {
                 score += 1.0;
             }
             continue;
         }
-        let Some(tf) = term_counts.get(token).copied() else {
+        let Some(tf) = term_counts.get(&term.token).copied() else {
             continue;
         };
-        let doc_freq = field_stats.doc_freqs.get(token).copied().unwrap_or(0);
+        let doc_freq = field_stats.doc_freqs.get(&term.token).copied().unwrap_or(0);
         if doc_freq == 0 {
             continue;
         }
@@ -2899,7 +3172,7 @@ fn bm25_score(
         let k1 = field_stats.config.k1();
         let b = field_stats.config.b();
         let k3 = field_stats.config.k3();
-        let qtf = query_term_counts.get(token).copied().unwrap_or(1) as f64;
+        let qtf = term.query_frequency as f64;
         let query_weight = (qtf * (k3 + 1.0)) / (qtf + k3);
         score += idf * (tf * (k1 + 1.0))
             / (tf + k1 * (1.0 - b + b * doc_len / field_stats.avg_len))
