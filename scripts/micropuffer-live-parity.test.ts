@@ -612,6 +612,20 @@ async function assertErrorParity(): Promise<void> {
   );
   const miniVectorEncoding = miniQueryError(namespaceName, invalidVectorEncodingQuery);
   expectErrorParity(miniVectorEncoding, liveVectorEncoding);
+
+  const missingNamespace = `${namespaceName}-missing`;
+  const missingQuery: JsonObject = {
+    rank_by: ["id", "asc"],
+    limit: 1
+  };
+  await deleteLiveNamespace(missingNamespace);
+  const liveMissingNamespace = await liveError(
+    "POST",
+    `/v2/namespaces/${encodeURIComponent(missingNamespace)}/query`,
+    missingQuery
+  );
+  const miniMissingNamespace = miniQueryError(missingNamespace, missingQuery);
+  expectErrorParity(miniMissingNamespace, liveMissingNamespace);
 }
 
 async function assertBranchParityIfAllowed(lookup: JsonObject): Promise<void> {
