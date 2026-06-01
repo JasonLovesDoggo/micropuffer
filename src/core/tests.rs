@@ -3184,8 +3184,14 @@ fn schema_update_and_warm_cache_match_workspace_shapes() {
             "schema-api",
             &json!({
                 "distance_metric": "cosine_distance",
+                "schema": {
+                    "sparse_vector": {
+                        "type": "{}f16",
+                        "sparse_knn": {"distance_metric": "dot_product"}
+                    }
+                },
                 "upsert_rows": [
-                    {"id": 1, "vector": [0.0, 0.0], "title": "hello"}
+                    {"id": 1, "vector": [0.0, 0.0], "sparse_vector": {"1": 1.0}, "title": "hello"}
                 ]
             }),
         )
@@ -3199,6 +3205,10 @@ fn schema_update_and_warm_cache_match_workspace_shapes() {
     assert_eq!(schema["title"]["type"], "string");
     assert_eq!(schema["title"]["filterable"], true);
     assert!(schema["title"]["full_text_search"].is_null());
+    assert_eq!(schema["sparse_vector"]["type"], "{}f16");
+    assert_eq!(schema["sparse_vector"]["filterable"], false);
+    assert!(schema["sparse_vector"]["full_text_search"].is_null());
+    assert!(schema["sparse_vector"].get("sparse_knn").is_none());
 
     let updated = clone
         .update_schema(
@@ -3219,6 +3229,7 @@ fn schema_update_and_warm_cache_match_workspace_shapes() {
     assert_eq!(updated["title"]["full_text_search"]["stemming"], true);
     assert_eq!(updated["title"]["full_text_search"]["k1"], 1.2);
     assert_eq!(updated["title"]["full_text_search"]["tokenizer"], "word_v3");
+    assert_eq!(updated["title"]["filterable"], false);
     assert_eq!(updated["title"]["regex"], true);
 
     let unknown_option = clone
