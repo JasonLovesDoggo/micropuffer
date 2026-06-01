@@ -55,7 +55,7 @@ Sources checked:
   - ungrouped sum aggregation
   - grouped count aggregation
   - grouped aggregation default `top_k`
-  - multi-query
+  - multi-query, including root-field leniency and selected validation errors
 - `POST /v1/namespaces/:namespace/_debug/recall`, exact basic response parity for deterministic small namespaces, including live's current omission of `ground_truth`
   - documented `rank_by` requests are supported locally; live currently returned `404` for the temp namespace, so live parity is skipped until the endpoint returns a stable success shape
 - `POST /v2/namespaces/:namespace/explain_query`, local shape only; live returned `400` for the temp namespace/index state
