@@ -166,6 +166,19 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
     miniQuery(namespaceName, perCategoryOrderQuery)
   );
 
+  const multiAttributeOrderQuery: JsonObject = {
+    rank_by: [
+      ["category", "asc"],
+      ["score", "desc"]
+    ],
+    limit: 3,
+    include_attributes: ["category", "score"]
+  };
+  expectJsonParity(
+    await liveQuery(namespaceName, multiAttributeOrderQuery),
+    miniQuery(namespaceName, multiAttributeOrderQuery)
+  );
+
   const fuzzyQuery: JsonObject = {
     rank_by: ["id", "asc"],
     limit: 10,
