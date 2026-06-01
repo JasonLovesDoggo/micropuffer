@@ -2166,16 +2166,25 @@ fn validate_write_rows_against_schema(
         validate_row_types(&schema, row, true)?;
     }
     for row in patches {
-        for vector_attribute in &vector_attributes {
-            if row.attributes.contains_key(vector_attribute) {
-                return Err(QueryError::new(format!(
-                    "Vector attribute '{vector_attribute}' cannot be patched; upsert the full document instead."
-                )));
-            }
+        if patch_row_has_dense_vector_attribute(row, &vector_attributes) {
+            return Err(vector_patch_unsupported_error());
         }
         validate_row_types(&schema, row, false)?;
     }
     Ok(())
+}
+
+fn patch_row_has_dense_vector_attribute(row: &WriteRow, vector_attributes: &[String]) -> bool {
+    if row.attributes.contains_key("vector") {
+        return true;
+    }
+    vector_attributes
+        .iter()
+        .any(|attribute| row.attributes.contains_key(attribute))
+}
+
+fn vector_patch_unsupported_error() -> QueryError {
+    QueryError::new("💔 patching vectors is currently unsupported")
 }
 
 fn normalize_write_rows_against_schema(
@@ -6416,18 +6425,16 @@ fn query_aggregations(
             }
         }
     }
-    let matching = namespace
-        .documents
-        .iter()
-        .filter(|document| {
-            filters
-                .map(|filter| {
-                    eval_filter_with_schema(document, filter, Some(&namespace.schema))
-                        .unwrap_or(false)
-                })
-                .unwrap_or(true)
-        })
-        .collect::<Vec<_>>();
+    let mut matching = Vec::new();
+    for document in &namespace.documents {
+        if filters
+            .map(|filter| eval_filter_with_schema(document, filter, Some(&namespace.schema)))
+            .transpose()?
+            .unwrap_or(true)
+        {
+            matching.push(document);
+        }
+    }
     if let Some(group_by) = request.get("group_by") {
         return query_grouped_aggregations(namespace, request, group_by, aggregations, &matching);
     }

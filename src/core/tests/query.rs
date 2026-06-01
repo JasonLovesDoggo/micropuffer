@@ -861,6 +861,25 @@ fn aggregates_and_grouped_aggregates_apply_filters() {
 }
 
 #[test]
+fn aggregate_filters_propagate_filter_errors() {
+    for aggregate_by in [
+        json!({"count": ["Count"]}),
+        json!({"score_sum": ["Sum", "score"]}),
+    ] {
+        let error = query_namespace(
+            &namespace(),
+            &json!({
+                "aggregate_by": aggregate_by,
+                "filters": ["score", "Bogus", 1]
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(error.status_code(), 400);
+        assert_eq!(error.to_string(), "Unsupported filter operator 'Bogus'.");
+    }
+}
+
+#[test]
 fn scalar_grouped_count_preserves_sorted_group_order() {
     let grouped = query_namespace(
         &namespace(),
