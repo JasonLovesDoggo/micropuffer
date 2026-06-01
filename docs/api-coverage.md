@@ -25,6 +25,7 @@ Sources checked:
   - `copy_from_namespace`
   - `distance_metric` required for first vector writes
   - top-level `distance_metric` requirement when schema `ann.distance_metric` is present
+  - explicit dense vector schemas must enable `ann`
   - distance metric mismatch rejection
   - scalar namespace rejection when adding a vector later
   - `schema.id` validation for `string`, `uint`, and `uuid`, including canonical UUID ID normalization and invalid/mixed ID rejection for row, column, patch, and delete writes
@@ -47,6 +48,7 @@ Sources checked:
   - `include_attributes` missing-attribute rejection
   - projections with `exclude_attributes`
   - `vector_encoding: "base64"` output
+  - base64 dense vector input for writes and ANN queries
   - `consistency.level` validation for `strong` and `eventual`
   - `limit.per` for order-by-attribute queries
   - ungrouped count aggregation
