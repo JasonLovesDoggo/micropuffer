@@ -2920,6 +2920,67 @@ fn export_namespace_uses_live_columnar_shape_with_missing_attribute_nulls() {
 }
 
 #[test]
+fn metadata_pinning_errors_match_live_status_and_text() {
+    let mut clone = Micropuffer::new();
+    clone
+        .write(
+            "workspace",
+            &json!({
+                "distance_metric": "cosine_distance",
+                "upsert_rows": [
+                    {"id": 1, "vector": [1.0, 0.0]}
+                ]
+            }),
+        )
+        .unwrap();
+
+    let invalid_pinning = clone
+        .patch_metadata("workspace", &json!({"pinning": "bad"}))
+        .unwrap_err();
+    assert_eq!(invalid_pinning.status_code(), 422);
+    assert_eq!(
+        invalid_pinning.to_string(),
+        "Failed to deserialize the JSON body into the target type: pinning: data did not match any variant of untagged enum UpdatePinningInput at line 1 column 17"
+    );
+
+    let invalid_replicas = clone
+        .patch_metadata("workspace", &json!({"pinning": {"replicas": "bad"}}))
+        .unwrap_err();
+    assert_eq!(invalid_replicas.status_code(), 422);
+    assert_eq!(
+        invalid_replicas.to_string(),
+        "Failed to deserialize the JSON body into the target type: pinning: data did not match any variant of untagged enum UpdatePinningInput at line 1 column 30"
+    );
+
+    let fractional_replicas = clone
+        .patch_metadata("workspace", &json!({"pinning": {"replicas": 1.5}}))
+        .unwrap_err();
+    assert_eq!(fractional_replicas.status_code(), 422);
+    assert_eq!(
+        fractional_replicas.to_string(),
+        "Failed to deserialize the JSON body into the target type: pinning: data did not match any variant of untagged enum UpdatePinningInput at line 1 column 28"
+    );
+
+    let negative_replicas = clone
+        .patch_metadata("workspace", &json!({"pinning": {"replicas": -1}}))
+        .unwrap_err();
+    assert_eq!(negative_replicas.status_code(), 422);
+    assert_eq!(
+        negative_replicas.to_string(),
+        "Failed to deserialize the JSON body into the target type: pinning: data did not match any variant of untagged enum UpdatePinningInput at line 1 column 27"
+    );
+
+    let zero_replicas = clone
+        .patch_metadata("workspace", &json!({"pinning": {"replicas": 0}}))
+        .unwrap_err();
+    assert_eq!(zero_replicas.status_code(), 400);
+    assert_eq!(
+        zero_replicas.to_string(),
+        "💔 replicas must be greater than 0"
+    );
+}
+
+#[test]
 fn query_validation_errors_carry_http_status_codes() {
     let namespace = namespace();
 
