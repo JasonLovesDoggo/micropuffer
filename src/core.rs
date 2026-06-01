@@ -1192,7 +1192,17 @@ pub fn write_store(
         "patch_columns",
         request.get("patch_columns"),
     )?;
-    let deletes = collect_delete_ids(request.get("deletes"))?;
+    let mut deletes = collect_delete_ids(request.get("deletes"))?;
+    let id_schema_type = effective_write_id_schema_type(
+        store.namespace(namespace_name).ok(),
+        request.get("schema"),
+    )?;
+    normalize_write_ids_against_id_schema(
+        id_schema_type.as_deref(),
+        &mut upserts,
+        &mut patches,
+        &mut deletes,
+    )?;
     reject_duplicate_write_ids(&upserts, &patches, &deletes)?;
     validate_distance_metric_for_write(
         store.namespace(namespace_name).ok(),
@@ -2839,6 +2849,7 @@ fn reject_duplicate_write_ids(
     deletes: &[Value],
 ) -> Result<(), QueryError> {
     let mut seen = BTreeSet::new();
+    let mut duplicates = BTreeMap::new();
     for id in upserts
         .iter()
         .map(|row| &row.id)
@@ -2847,10 +2858,16 @@ fn reject_duplicate_write_ids(
     {
         let key = id_key(id);
         if !seen.insert(key) {
-            return Err(QueryError::new(
-                "the same document ID cannot appear multiple times in one write request.",
-            ));
+            duplicates
+                .entry(id_key(id))
+                .or_insert_with(|| document_id_error_value(id));
         }
+    }
+    if !duplicates.is_empty() {
+        let duplicated_ids = duplicates.into_values().collect::<Vec<_>>().join(",");
+        return Err(QueryError::new(format!(
+            "💔 This upsert contains duplicate document IDs and was not written. You should ensure that individual upserts do not include duplicate documents. The duplicated IDs in this batch were the following: {duplicated_ids}"
+        )));
     }
     Ok(())
 }
@@ -3094,6 +3111,115 @@ fn validate_document_id(id: &Value) -> Result<(), QueryError> {
     }
 }
 
+fn effective_write_id_schema_type(
+    namespace: Option<&Namespace>,
+    schema: Option<&Value>,
+) -> Result<Option<String>, QueryError> {
+    let requested = schema
+        .map(|schema| -> Result<Option<String>, QueryError> {
+            let schema = as_object(schema, "schema")?;
+            schema
+                .get("id")
+                .map(|definition| {
+                    incoming_schema_type_name("id", definition).map(ToString::to_string)
+                })
+                .transpose()
+        })
+        .transpose()?
+        .flatten();
+    if requested.is_some() {
+        return Ok(requested);
+    }
+    namespace
+        .and_then(|namespace| namespace.schema.get("id"))
+        .map(schema_type_name)
+        .transpose()
+        .map(|schema_type| schema_type.map(ToString::to_string))
+}
+
+fn normalize_write_ids_against_id_schema(
+    id_schema_type: Option<&str>,
+    upserts: &mut [WriteRow],
+    patches: &mut [WriteRow],
+    deletes: &mut [Value],
+) -> Result<(), QueryError> {
+    if id_schema_type != Some("uuid") {
+        return Ok(());
+    }
+    let all_ids = upserts
+        .iter()
+        .map(|row| &row.id)
+        .chain(patches.iter().map(|row| &row.id))
+        .chain(deletes.iter());
+    for id in all_ids {
+        canonical_uuid_id(id)?;
+    }
+    for id in upserts
+        .iter_mut()
+        .map(|row| &mut row.id)
+        .chain(patches.iter_mut().map(|row| &mut row.id))
+        .chain(deletes.iter_mut())
+    {
+        *id = Value::String(canonical_uuid_id(id)?);
+    }
+    Ok(())
+}
+
+fn uuid_id_error() -> QueryError {
+    QueryError::new("💔 namespace ID type is uuid, but a written ID could not be parsed as uuid")
+}
+
+fn canonical_uuid_id(id: &Value) -> Result<String, QueryError> {
+    let Some(text) = id.as_str() else {
+        return Err(uuid_id_error());
+    };
+    canonical_uuid_text(text).ok_or_else(uuid_id_error)
+}
+
+fn canonical_uuid_text(text: &str) -> Option<String> {
+    if let Some(rest) = text.strip_prefix("urn:uuid:") {
+        return canonical_hyphenated_uuid_text(rest);
+    }
+    if let Some(rest) = text
+        .strip_prefix('{')
+        .and_then(|rest| rest.strip_suffix('}'))
+    {
+        return canonical_hyphenated_uuid_text(rest);
+    }
+    if text.len() == 32 {
+        return canonical_simple_uuid_text(text);
+    }
+    canonical_hyphenated_uuid_text(text)
+}
+
+fn canonical_simple_uuid_text(text: &str) -> Option<String> {
+    if text.len() != 32 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let lower = text.to_ascii_lowercase();
+    Some(format!(
+        "{}-{}-{}-{}-{}",
+        &lower[0..8],
+        &lower[8..12],
+        &lower[12..16],
+        &lower[16..20],
+        &lower[20..32]
+    ))
+}
+
+fn canonical_hyphenated_uuid_text(text: &str) -> Option<String> {
+    if text.len() != 36 {
+        return None;
+    }
+    if !text.bytes().enumerate().all(|(index, byte)| {
+        matches!(index, 8 | 13 | 18 | 23) && byte == b'-'
+            || !matches!(index, 8 | 13 | 18 | 23) && byte.is_ascii_hexdigit()
+    }) {
+        return None;
+    }
+    Some(text.to_ascii_lowercase())
+}
+
 fn validate_attribute_name(name: &str) -> Result<(), QueryError> {
     if name == "id" {
         return Ok(());
@@ -3114,6 +3240,13 @@ fn id_key(id: &Value) -> String {
             .or_else(|| legacy_float_id_key(number))
             .unwrap_or_else(|| id.to_string()),
         Value::String(text) => format!("string:{text}"),
+        _ => id.to_string(),
+    }
+}
+
+fn document_id_error_value(id: &Value) -> String {
+    match id {
+        Value::String(text) => text.clone(),
         _ => id.to_string(),
     }
 }

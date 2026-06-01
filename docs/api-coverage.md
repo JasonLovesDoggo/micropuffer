@@ -26,6 +26,7 @@ Sources checked:
   - top-level `distance_metric` requirement when schema `ann.distance_metric` is present
   - distance metric mismatch rejection
   - scalar namespace rejection when adding a vector later
+  - `schema.id = "uuid"` validation, canonical ID normalization, and invalid UUID rejection for row, column, patch, and delete writes
 - `POST /v2/namespaces/:namespace/query`
   - `ANN`
   - distance metrics: `cosine_distance`, `euclidean`, `euclidean_squared`
@@ -71,6 +72,7 @@ Sources checked:
   - missing row `id`
   - malformed `deletes`
   - `copy_from_namespace` mixed with ordinary write fields
+  - duplicate document IDs, including duplicate IDs after UUID canonicalization
 - exact status/body parity for schema type-change validation, including the `attribute` body field
 - exact status/body parity for selected malformed schema update failures
 - live-style plain-text HTTP response envelopes for URL-layer namespace validation errors
