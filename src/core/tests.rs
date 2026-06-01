@@ -2588,6 +2588,7 @@ fn micropuffer_lists_copies_and_deletes_namespaces() {
     let listed = clone.list_namespaces(Some("demo"), None, 10).unwrap();
     let namespaces = listed.get("namespaces").and_then(Value::as_array).unwrap();
     assert_eq!(namespaces.len(), 2);
+    assert_eq!(listed["next_cursor"], Value::Null);
     let first_page = clone.list_namespaces(Some("demo"), None, 1).unwrap();
     assert_eq!(first_page["namespaces"], json!([{"id": "demo-copy"}]));
     let cursor = first_page["next_cursor"].as_str().unwrap();
@@ -2608,7 +2609,19 @@ fn micropuffer_lists_copies_and_deletes_namespaces() {
         .list_namespaces(Some("demo"), Some(second_cursor), 1)
         .unwrap();
     assert_eq!(empty_page["namespaces"], json!([]));
-    assert!(empty_page.get("next_cursor").is_none());
+    assert_eq!(empty_page["next_cursor"], Value::Null);
+    let zero_page_size = clone.list_namespaces(Some("demo"), None, 0).unwrap_err();
+    assert_eq!(zero_page_size.status_code(), 400);
+    assert_eq!(
+        zero_page_size.to_string(),
+        "💔 Page size must be in range 1..=1000, was 0"
+    );
+    let large_page_size = clone.list_namespaces(Some("demo"), None, 1001).unwrap_err();
+    assert_eq!(large_page_size.status_code(), 400);
+    assert_eq!(
+        large_page_size.to_string(),
+        "💔 Page size must be in range 1..=1000, was 1001"
+    );
     let copied = clone
         .query("demo-copy", &json!({"aggregate_by": {"count": ["Count"]}}))
         .unwrap();

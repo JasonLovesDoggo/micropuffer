@@ -50,6 +50,11 @@ const baseUrl = `https://${region}.turbopuffer.com`;
 
 const micropuffer = new Micropuffer();
 
+type TextErrorResult = {
+  status: number;
+  body: string;
+};
+
 afterAll(async () => {
   for (const namespace of namespacesToDelete) {
     await deleteLiveNamespace(namespace);
@@ -451,17 +456,17 @@ async function assertListNamespaceParity(): Promise<void> {
     `/v1/namespaces?prefix=${encodeURIComponent(namespaceName)}&page_size=10`
   );
   const mini = parseJsonObject(
-    micropuffer.listNamespaces(JSON.stringify({ prefix: namespaceName, page_size: 10 })),
+    micropuffer.listNamespaces(JSON.stringify({ prefix: namespaceName, page_size: "10" })),
     "micropuffer list response"
   );
-  expect(namespaceIds(mini)).toStrictEqual(namespaceIds(live));
+  expectJsonParity(live, mini);
 
   const liveFirstPage = await liveJson(
     "GET",
     `/v1/namespaces?prefix=${encodeURIComponent(namespaceName)}&page_size=1`
   );
   const miniFirstPage = parseJsonObject(
-    micropuffer.listNamespaces(JSON.stringify({ prefix: namespaceName, page_size: 1 })),
+    micropuffer.listNamespaces(JSON.stringify({ prefix: namespaceName, page_size: "1" })),
     "micropuffer list first page response"
   );
   expectJsonParity(liveFirstPage, miniFirstPage);
@@ -471,10 +476,34 @@ async function assertListNamespaceParity(): Promise<void> {
     `/v1/namespaces?prefix=${encodeURIComponent(namespaceName)}&page_size=1&cursor=${encodeURIComponent(cursor)}`
   );
   const miniSecondPage = parseJsonObject(
-    micropuffer.listNamespaces(JSON.stringify({ prefix: namespaceName, page_size: 1, cursor })),
+    micropuffer.listNamespaces(JSON.stringify({ prefix: namespaceName, page_size: "1", cursor })),
     "micropuffer list second page response"
   );
   expectJsonParity(liveSecondPage, miniSecondPage);
+
+  const liveEmptyPage = await liveJson(
+    "GET",
+    `/v1/namespaces?prefix=${encodeURIComponent(`${namespaceName}-empty`)}&page_size=1`
+  );
+  const miniEmptyPage = parseJsonObject(
+    micropuffer.listNamespaces(JSON.stringify({ prefix: `${namespaceName}-empty`, page_size: "1" })),
+    "micropuffer list empty page response"
+  );
+  expectJsonParity(liveEmptyPage, miniEmptyPage);
+
+  const liveZeroPageSize = await liveError(
+    "GET",
+    `/v1/namespaces?prefix=${encodeURIComponent(namespaceName)}&page_size=0`
+  );
+  const miniZeroPageSize = miniListNamespacesJsonError({ prefix: namespaceName, page_size: "0" });
+  expectErrorParity(miniZeroPageSize, liveZeroPageSize);
+
+  const liveBadPageSize = await liveTextError(
+    "GET",
+    `/v1/namespaces?prefix=${encodeURIComponent(namespaceName)}&page_size=bad`
+  );
+  const miniBadPageSize = miniListNamespacesTextError({ prefix: namespaceName, page_size: "bad" });
+  expectTextErrorParity(miniBadPageSize, liveBadPageSize);
 }
 
 async function assertMetadataParity(): Promise<void> {
@@ -1412,6 +1441,60 @@ async function liveError(
   };
 }
 
+async function liveTextError(
+  method: "DELETE" | "GET" | "POST",
+  path: string,
+  body?: JsonObject
+): Promise<TextErrorResult> {
+  const init: RequestInit = {
+    method,
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    }
+  };
+  if (body !== undefined) {
+    init.body = JSON.stringify(body);
+  }
+
+  const response = await fetch(`${baseUrl}${path}`, init);
+  const responseBody = await response.text();
+  if (response.ok) {
+    throw new Error(`Expected live request to fail, got HTTP ${response.status}.`);
+  }
+  return {
+    status: response.status,
+    body: responseBody
+  };
+}
+
+function miniListNamespacesJsonError(request: JsonObject): ErrorResult {
+  const response = parseJsonObject(
+    micropuffer.listNamespacesResponse(JSON.stringify(request)),
+    "micropuffer list namespaces response envelope"
+  );
+  return errorResultFromEnvelope(response, "list namespaces");
+}
+
+function miniListNamespacesTextError(request: JsonObject): TextErrorResult {
+  const response = parseJsonObject(
+    micropuffer.listNamespacesResponse(JSON.stringify(request)),
+    "micropuffer list namespaces response envelope"
+  );
+  const status = response.status;
+  const body = response.body;
+  if (typeof status !== "number") {
+    throw new Error("micropuffer list namespaces response status was not a number.");
+  }
+  if (typeof body !== "string") {
+    throw new Error("micropuffer list namespaces response body was not a string.");
+  }
+  if (status < 400) {
+    throw new Error("Expected micropuffer list namespaces to fail.");
+  }
+  return { status, body };
+}
+
 function miniQueryError(namespace: string, request: JsonObject): ErrorResult {
   const response = parseJsonObject(
     micropuffer.queryResponse(namespace, JSON.stringify(request)),
@@ -1463,6 +1546,11 @@ function expectErrorParity(mini: ErrorResult, live: ErrorResult): void {
   expect(mini.status).toBe(live.status);
   expect(mini.body.status).toBe(live.body.status);
   expect(errorWithoutLocation(mini.body.error)).toBe(errorWithoutLocation(live.body.error));
+}
+
+function expectTextErrorParity(mini: TextErrorResult, live: TextErrorResult): void {
+  expect(mini.status).toBe(live.status);
+  expect(mini.body).toBe(live.body);
 }
 
 function errorWithoutLocation(error: JsonValue): string {
@@ -1526,21 +1614,6 @@ async function deleteLiveNamespace(namespace: string): Promise<void> {
     }
     throw error;
   }
-}
-
-function namespaceIds(response: JsonObject): string[] {
-  const namespaces = response.namespaces;
-  if (!Array.isArray(namespaces)) {
-    throw new Error("namespace list response did not contain namespaces.");
-  }
-  return namespaces.map(namespaceId).sort();
-}
-
-function namespaceId(value: JsonValue): string {
-  if (!isJsonObject(value) || typeof value.id !== "string") {
-    throw new Error("namespace list item did not contain an id.");
-  }
-  return value.id;
 }
 
 function float32Base64(values: number[]): string {
