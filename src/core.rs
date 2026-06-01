@@ -161,7 +161,7 @@ impl Micropuffer {
         self.store.namespace(namespace_name)?;
         Ok(json!({
             "status": "ACCEPTED",
-            "message": "micropuffer cache is already memory-resident"
+            "message": "cache warm hint accepted"
         }))
     }
 

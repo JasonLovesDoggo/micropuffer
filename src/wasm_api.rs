@@ -98,8 +98,18 @@ fn error_body(error: &QueryError) -> Value {
 }
 
 fn http_response(result: Result<Value, QueryError>) -> Result<String, JsValue> {
+    http_response_with_status(result, 200)
+}
+
+fn http_response_with_status(
+    result: Result<Value, QueryError>,
+    ok_status: u16,
+) -> Result<String, JsValue> {
     let response = match result {
-        Ok(body) => HttpResponse { status: 200, body },
+        Ok(body) => HttpResponse {
+            status: ok_status,
+            body,
+        },
         Err(error) => HttpResponse {
             status: error.status_code(),
             body: error_body(&error),
@@ -318,7 +328,7 @@ impl Micropuffer {
 
     #[wasm_bindgen(js_name = warmCacheResponse)]
     pub fn warm_cache_response(&self, namespace_name: &str) -> Result<String, JsValue> {
-        http_response(self.engine.warm_cache(namespace_name))
+        http_response_with_status(self.engine.warm_cache(namespace_name), 202)
     }
 
     pub fn recall(&self, namespace_name: &str, request_json: &str) -> Result<String, JsValue> {
