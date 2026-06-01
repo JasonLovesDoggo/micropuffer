@@ -9,6 +9,7 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    environment: release
     permissions:
       contents: read
       id-token: write
@@ -43,9 +44,12 @@ jobs:
 
       - run: cargo publish --dry-run --locked
 
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: crates-io-auth
+
       - run: cargo publish --locked
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
 
       - run: pnpm publish --access public --provenance --no-git-checks
         env:
