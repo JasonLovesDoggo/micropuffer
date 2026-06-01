@@ -725,14 +725,35 @@ fn aggregates_and_grouped_aggregates_apply_filters() {
     let response = query_namespace(
         &namespace(),
         &json!({
-            "aggregate_by": {"count": ["Count"], "score_sum": ["Sum", "score"]},
-            "filters": ["public", "Eq", true],
-            "limit": 10
+            "aggregate_by": {"count": ["Count"]},
+            "filters": ["public", "Eq", true]
         }),
     )
     .unwrap();
     assert_eq!(response["aggregations"]["count"], 2);
-    assert_eq!(response["aggregations"]["score_sum"], 17.0);
+
+    let sum = query_namespace(
+        &namespace(),
+        &json!({
+            "aggregate_by": {"score_sum": ["Sum", "score"]},
+            "filters": ["public", "Eq", true]
+        }),
+    )
+    .unwrap();
+    assert_eq!(sum["aggregations"]["score_sum"], 17.0);
+
+    let multi_error = query_namespace(
+        &namespace(),
+        &json!({
+            "aggregate_by": {"count": ["Count"], "score_sum": ["Sum", "score"]}
+        }),
+    )
+    .unwrap_err();
+    assert!(
+        multi_error
+            .to_string()
+            .contains("💔 aggregate_by currently requires exactly one function")
+    );
 
     let grouped = query_namespace(
         &namespace(),
@@ -750,6 +771,25 @@ fn aggregates_and_grouped_aggregates_apply_filters() {
     assert!(groups.iter().any(|group| group["tenant_id"] == "alpha"
         && group["tag"] == "rust"
         && group["count"] == 2));
+
+    let grouped_sum = query_namespace(
+        &namespace(),
+        &json!({
+            "aggregate_by": {"score_sum": ["Sum", "score"]},
+            "group_by": ["tenant_id"],
+            "limit": {"total": 10}
+        }),
+    )
+    .unwrap();
+    let sum_groups = grouped_sum
+        .get("aggregation_groups")
+        .and_then(Value::as_array)
+        .unwrap();
+    assert!(
+        sum_groups
+            .iter()
+            .any(|group| group["tenant_id"] == "alpha" && group["score_sum"] == 17.0)
+    );
 }
 
 #[test]

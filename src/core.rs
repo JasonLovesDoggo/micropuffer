@@ -4863,6 +4863,7 @@ fn query_aggregations(
     aggregate_by: &Value,
 ) -> Result<Value, QueryError> {
     let aggregations = as_object(aggregate_by, "aggregate_by")?;
+    validate_single_aggregate(aggregations)?;
     let filters = request.get("filters");
     let count_labels = count_aggregate_labels(aggregations)?;
     if let Some(labels) = &count_labels {
@@ -4915,6 +4916,15 @@ fn query_aggregations(
         output.insert(label.clone(), evaluate_aggregate(aggregate, &matching)?);
     }
     Ok(with_metrics(json!({ "aggregations": output }), namespace))
+}
+
+fn validate_single_aggregate(aggregations: &Map<String, Value>) -> Result<(), QueryError> {
+    if aggregations.len() == 1 {
+        return Ok(());
+    }
+    Err(QueryError::new(
+        "💔 aggregate_by currently requires exactly one function",
+    ))
 }
 
 fn count_aggregate_labels(
