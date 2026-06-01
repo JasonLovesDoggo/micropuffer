@@ -1126,6 +1126,40 @@ async function assertUuidIdSchemaParity(): Promise<void> {
   };
   expectJsonParity(await liveWrite(uuidNamespaceName, patchColumns), miniWrite(uuidNamespaceName, patchColumns));
 
+  const conditionalUuidUpsert: JsonObject = {
+    upsert_rows: [
+      { id: "769C134D-07B8-4225-954A-B6CC5FFC320C", title: "conditioned" }
+    ],
+    upsert_condition: ["id", "Eq", "769C134D-07B8-4225-954A-B6CC5FFC320C"],
+    return_affected_ids: true
+  };
+  expectJsonParity(
+    await liveWrite(uuidNamespaceName, conditionalUuidUpsert),
+    miniWrite(uuidNamespaceName, conditionalUuidUpsert)
+  );
+
+  const conditionalUuidPatch: JsonObject = {
+    patch_rows: [
+      { id: "769c134d07b84225954ab6cc5ffc320d", title: "conditioned patch" }
+    ],
+    patch_condition: ["id", "Eq", "769c134d07b84225954ab6cc5ffc320d"],
+    return_affected_ids: true
+  };
+  expectJsonParity(
+    await liveWrite(uuidNamespaceName, conditionalUuidPatch),
+    miniWrite(uuidNamespaceName, conditionalUuidPatch)
+  );
+
+  const conditionalUuidDelete: JsonObject = {
+    deletes: ["{769c134d-07b8-4225-954a-b6cc5ffc320e}"],
+    delete_condition: ["id", "Eq", "{769c134d-07b8-4225-954a-b6cc5ffc320e}"],
+    return_affected_ids: true
+  };
+  expectJsonParity(
+    await liveWrite(uuidNamespaceName, conditionalUuidDelete),
+    miniWrite(uuidNamespaceName, conditionalUuidDelete)
+  );
+
   const deleteByUrn: JsonObject = {
     deletes: ["urn:uuid:769c134d-07b8-4225-954a-b6cc5ffc320f"],
     return_affected_ids: true

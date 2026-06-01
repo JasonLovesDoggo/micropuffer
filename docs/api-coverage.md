@@ -20,6 +20,7 @@ Sources checked:
   - `delete_by_filter`
   - column upserts
   - conditional upserts, patches, and deletes
+  - typed `id` filters inside write conditions
   - `return_affected_ids`
   - `copy_from_namespace`
   - `distance_metric` required for first vector writes
