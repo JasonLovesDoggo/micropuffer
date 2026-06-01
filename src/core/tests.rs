@@ -3300,6 +3300,7 @@ fn schema_update_and_warm_cache_match_workspace_shapes() {
 
     let warmed = clone.warm_cache("schema-api").unwrap();
     assert_eq!(warmed["status"], "ACCEPTED");
+    assert_eq!(warmed["message"], "cache warm hint accepted");
 }
 
 #[test]

@@ -65,7 +65,7 @@ Sources checked:
 - `POST /v1/namespaces/:namespace/schema`, exact response parity for covered updates
   - unknown schema option keys are ignored when `type` is present
   - object definitions without `type` return live-style `422` deserialize errors
-- `GET /v1/namespaces/:namespace/hint_cache_warm`, status parity only
+- `GET /v1/namespaces/:namespace/hint_cache_warm`, exact body and `202` status parity
 - path namespace validation for invalid characters and names over 128 characters
 - exact status/body parity for include/exclude projection validation
 - exact status/body parity for selected consistency validation failures
