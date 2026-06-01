@@ -57,6 +57,7 @@ Sources checked:
   - grouped aggregation default `top_k`
   - multi-query
 - `POST /v1/namespaces/:namespace/_debug/recall`, exact basic response parity for deterministic small namespaces, including live's current omission of `ground_truth`
+  - documented `rank_by` requests are supported locally; live currently returned `404` for the temp namespace, so live parity is skipped until the endpoint returns a stable success shape
 - `POST /v2/namespaces/:namespace/explain_query`, local shape only; live returned `400` for the temp namespace/index state
 - deprecated `GET /v1/namespaces/:namespace` columnar export
 - `GET /v1/namespaces`, including prefix, query-string `page_size` parsing, live-style `cursor` pagination, exhausted-page `next_cursor: null`, page-size error parity, and malformed-cursor error parity
@@ -104,6 +105,7 @@ Sources checked:
 
 - live branch parity: the current test key returns `403` for `branch_from_namespace`
 - full live `explain_query` parity: the live endpoint returned `400` (`index does not exist, cannot explain`) for the temp namespace
+- full live `recall.rank_by` parity: the docs describe `rank_by`, but the live endpoint returned `404` for a temp namespace where ordinary recall succeeded
 - live pinning parity: micropuffer has a metadata helper, but this is not verified against live pinning because it can have account and billing effects
 - exact billing and performance values
 - exact async/indexing behavior, including approximate metadata lag
@@ -120,3 +122,4 @@ Sources checked:
 - The query docs imply multiple `aggregate_by` labels can be supplied, but live turbopuffer currently rejects multiple aggregate functions with `💔 aggregate_by currently requires exactly one function`.
 - Live schema updates require `type` for object definitions, but ignore unknown option keys when `type` is present.
 - OpenAPI documents `include_ground_truth` on recall responses, but live turbopuffer currently omits `ground_truth` even when `include_ground_truth: true`.
+- The recall docs document `rank_by`; live validation accepts its shape, but success requests currently returned `404` for the tested temp namespace even though ordinary recall on the same namespace returned `200`.
