@@ -1,8 +1,7 @@
 use crate::core::{
     DistanceMetric, Document, Micropuffer, MiniStore, Namespace, PATCH_BY_FILTER_LIMIT,
-    bm25_stats_build_count, default_created_at, default_encryption, namespace_metadata,
-    parse_fts_config, query_namespace, query_store, reset_bm25_stats_build_count, tokenize,
-    write_store,
+    default_created_at, default_encryption, namespace_metadata, parse_fts_config, query_namespace,
+    query_store, tokenize, write_store,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Map, Number, Value, json};
@@ -204,7 +203,7 @@ fn filters_support_documented_fuzzy_options_token_arrays_and_null_comparisons() 
 }
 
 #[test]
-fn non_bm25_rank_plans_do_not_build_bm25_stats() {
+fn non_bm25_rank_plans_execute_without_fts_indexes() {
     let namespace = namespace();
     let non_bm25_queries = [
         json!({
@@ -230,16 +229,12 @@ fn non_bm25_rank_plans_do_not_build_bm25_stats() {
     ];
 
     for query in non_bm25_queries {
-        reset_bm25_stats_build_count();
         query_namespace(&namespace, &query).unwrap();
-        assert_eq!(bm25_stats_build_count(), 0, "query: {query}");
     }
 }
 
 #[test]
 fn bm25_and_rank_operators_score_higher_matches_first() {
-    reset_bm25_stats_build_count();
-
     let response = query_namespace(
         &namespace(),
         &json!({
@@ -257,7 +252,6 @@ fn bm25_and_rank_operators_score_higher_matches_first() {
     assert!(
         response_rows[0]["$dist"].as_f64().unwrap() > response_rows[1]["$dist"].as_f64().unwrap()
     );
-    assert_eq!(bm25_stats_build_count(), 1);
 
     let token_array = query_namespace(
         &namespace(),
@@ -268,7 +262,90 @@ fn bm25_and_rank_operators_score_higher_matches_first() {
     )
     .unwrap();
     assert_eq!(rows(&token_array)[0]["id"], 3);
-    assert_eq!(bm25_stats_build_count(), 1);
+}
+
+#[test]
+fn nested_bm25_rank_operators_use_indexed_scores() {
+    let namespace: Namespace = serde_json::from_value(json!({
+        "name": "nested-bm25",
+        "schema": {
+            "text": {"type": "string", "full_text_search": true},
+            "title": {"type": "string", "full_text_search": true}
+        },
+        "documents": [
+            {"id": 1, "title": "walrus guide", "text": "walrus walrus arctic mammal", "boost": 1},
+            {"id": 2, "title": "reef notes", "text": "reef coral fish", "boost": 100},
+            {"id": 3, "title": "arctic field report", "text": "arctic mammal migration", "boost": 2}
+        ]
+    }))
+    .unwrap();
+
+    let product = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["Product", 2, ["text", "BM25", "walrus arctic"]],
+            "limit": 3
+        }),
+    )
+    .unwrap();
+    assert_eq!(rows(&product)[0]["id"], 1);
+
+    let sum = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["Sum", [
+                ["text", "BM25", "walrus"],
+                ["title", "BM25", "field"]
+            ]],
+            "limit": 3
+        }),
+    )
+    .unwrap();
+    assert_eq!(rows(&sum)[0]["id"], 1);
+    assert_eq!(rows(&sum)[1]["id"], 3);
+
+    let max = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["Max",
+                ["text", "BM25", "reef"],
+                ["title", "BM25", "guide"]
+            ],
+            "limit": 3
+        }),
+    )
+    .unwrap();
+    assert_eq!(rows(&max)[0]["id"], 1);
+    assert_eq!(rows(&max)[1]["id"], 2);
+
+    let saturate = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["Saturate", ["text", "BM25", "walrus"], {"midpoint": 0.1}],
+            "limit": 3
+        }),
+    )
+    .unwrap();
+    assert_eq!(rows(&saturate)[0]["id"], 1);
+
+    let simple = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["text", "BM25", "walrus arctic"],
+            "limit": 1
+        }),
+    )
+    .unwrap();
+    let origin = rows(&simple)[0]["$dist"].as_f64().unwrap();
+    let decay = query_namespace(
+        &namespace,
+        &json!({
+            "rank_by": ["Decay", ["Dist", ["text", "BM25", "walrus arctic"], origin], {"midpoint": 0.01}],
+            "limit": 3
+        }),
+    )
+    .unwrap();
+    assert_eq!(rows(&decay)[0]["id"], 1);
 }
 
 #[test]
@@ -481,7 +558,6 @@ fn indexed_bm25_updates_after_writes_and_supports_prefix_queries() {
         )
         .unwrap();
 
-    reset_bm25_stats_build_count();
     let first = clone
         .query(
             "fts-index",
@@ -492,7 +568,6 @@ fn indexed_bm25_updates_after_writes_and_supports_prefix_queries() {
         )
         .unwrap();
     assert_eq!(rows(&first)[0]["id"], 1);
-    assert_eq!(bm25_stats_build_count(), 0);
 
     clone
         .write(
@@ -521,12 +596,26 @@ fn indexed_bm25_updates_after_writes_and_supports_prefix_queries() {
         .query(
             "fts-index",
             &json!({
-                "rank_by": ["text", "BM25", "arct", {"last_as_prefix": true}],
+                "rank_by": ["Product", 2, ["text", "BM25", "arct", {"last_as_prefix": true}]],
                 "limit": 10
             }),
         )
         .unwrap();
     assert_eq!(rows(&prefix)[0]["id"], 2);
+
+    let nested_after_write = clone
+        .query(
+            "fts-index",
+            &json!({
+                "rank_by": ["Sum", [
+                    ["text", "BM25", "walrus"],
+                    ["text", "BM25", "arctic"]
+                ]],
+                "limit": 10
+            }),
+        )
+        .unwrap();
+    assert_eq!(rows(&nested_after_write)[0]["id"], 2);
 }
 
 #[test]

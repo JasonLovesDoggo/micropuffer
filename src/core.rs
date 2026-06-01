@@ -386,7 +386,6 @@ struct PerLimit {
 struct RankPlan<'a> {
     rank_by: &'a Value,
     kind: RankKind,
-    contains_bm25: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -428,8 +427,7 @@ enum PreparedRankExpr<'a> {
         query: HashMap<String, f64>,
     },
     Bm25 {
-        field: &'a str,
-        query: Option<PreparedBm25Query>,
+        scores: PreparedBm25Scores,
     },
     Filter(&'a Value),
 }
@@ -459,16 +457,9 @@ struct PreparedBm25Term {
 }
 
 #[derive(Debug, Clone)]
-struct Bm25FieldStats {
-    doc_count: usize,
-    avg_len: f64,
-    doc_freqs: HashMap<String, usize>,
-    config: FtsConfig,
-}
-
-#[derive(Debug, Clone)]
-struct Bm25Stats {
-    fields: HashMap<String, Bm25FieldStats>,
+struct PreparedBm25Scores {
+    by_doc: HashMap<usize, f64>,
+    ranked: Vec<(usize, f64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -485,6 +476,17 @@ struct FtsFieldIndex {
 struct FtsPosting {
     doc_index: usize,
     term_frequency: usize,
+}
+
+impl PreparedBm25Scores {
+    fn new(ranked: Vec<(usize, f64)>) -> Self {
+        let by_doc = ranked.iter().copied().collect();
+        Self { by_doc, ranked }
+    }
+
+    fn score(&self, doc_index: usize) -> f64 {
+        self.by_doc.get(&doc_index).copied().unwrap_or(0.0)
+    }
 }
 
 impl FtsFieldIndex {
@@ -1061,10 +1063,8 @@ fn query_single(
     let limit = parse_limit(object)?;
     let filters = object.get("filters");
     let rank_plan = parse_rank_plan(rank_by, filters.is_some())?;
-    let bm25_stats = (rank_plan.contains_bm25 && !rank_by_is_simple_bm25(rank_by))
-        .then(|| Bm25Stats::new(namespace));
-    let prepared_rank_plan = prepare_rank_plan(rank_plan, bm25_stats.as_ref(), namespace)?;
-    let ranked = rank_documents(namespace, &prepared_rank_plan, filters, bm25_stats.as_ref())?;
+    let prepared_rank_plan = prepare_rank_plan(rank_plan, namespace)?;
+    let ranked = rank_documents(namespace, &prepared_rank_plan, filters)?;
     let ranked = apply_limit(ranked, &limit, &prepared_rank_plan.kind)?;
     let mut rows = Vec::with_capacity(ranked.len());
     for ranked_doc in ranked {
@@ -2480,76 +2480,6 @@ fn legacy_float_id_key(number: &Number) -> Option<String> {
     }
 }
 
-impl Bm25Stats {
-    fn new(namespace: &Namespace) -> Self {
-        #[cfg(test)]
-        BM25_STATS_BUILD_COUNT.with(|count| count.set(count.get() + 1));
-
-        let mut fields: BTreeSet<String> = BTreeSet::new();
-        for document in &namespace.documents {
-            for (field, value) in &document.attributes {
-                if value.is_string()
-                    || value
-                        .as_array()
-                        .is_some_and(|items| items.iter().all(Value::is_string))
-                {
-                    fields.insert(field.clone());
-                }
-            }
-        }
-        let mut stats = HashMap::new();
-        for field in fields {
-            let config = fts_config_for_field(namespace, &field);
-            let mut doc_freqs: HashMap<String, usize> = HashMap::new();
-            let mut total_len = 0usize;
-            let mut doc_count = 0usize;
-            for document in &namespace.documents {
-                let tokens = string_attr_tokens_with_config(document, &field, &config);
-                if tokens.is_empty() {
-                    continue;
-                }
-                doc_count += 1;
-                total_len += tokens.len();
-                let unique: BTreeSet<String> = tokens.into_iter().collect();
-                for token in unique {
-                    let count = doc_freqs.entry(token).or_insert(0);
-                    *count += 1;
-                }
-            }
-            let avg_len = if doc_count == 0 {
-                0.0
-            } else {
-                total_len as f64 / doc_count as f64
-            };
-            stats.insert(
-                field,
-                Bm25FieldStats {
-                    doc_count,
-                    avg_len,
-                    doc_freqs,
-                    config,
-                },
-            );
-        }
-        Self { fields: stats }
-    }
-}
-
-#[cfg(test)]
-thread_local! {
-    static BM25_STATS_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-fn reset_bm25_stats_build_count() {
-    BM25_STATS_BUILD_COUNT.with(|count| count.set(0));
-}
-
-#[cfg(test)]
-fn bm25_stats_build_count() -> usize {
-    BM25_STATS_BUILD_COUNT.with(std::cell::Cell::get)
-}
-
 fn validate_multi_query_root(object: &Map<String, Value>) -> Result<(), QueryError> {
     for key in object.keys() {
         if key != "queries" && key != "vector_encoding" && key != "consistency" {
@@ -2640,63 +2570,31 @@ fn clamp_limit(raw: u64, label: &str) -> Result<usize, QueryError> {
 
 fn parse_rank_plan<'a>(rank_by: &'a Value, has_filters: bool) -> Result<RankPlan<'a>, QueryError> {
     let array = as_array(rank_by, "rank_by")?;
-    let (kind, contains_bm25) = if !array.is_empty() && array.iter().all(Value::is_array) {
+    let kind = if !array.is_empty() && array.iter().all(Value::is_array) {
         let attributes = array
             .iter()
             .map(parse_attribute_order)
             .collect::<Result<Vec<_>, _>>()?;
-        (RankKind::MultiAttributeOrder { attributes }, false)
+        RankKind::MultiAttributeOrder { attributes }
     } else if array.len() == 2 {
         let attr = as_string(&array[0], "rank_by attribute")?;
         if array[1].as_str() == Some("asc") {
-            (
-                RankKind::AttributeOrder {
-                    attribute: attr.to_string(),
-                    direction: SortDirection::Asc,
-                },
-                false,
-            )
+            RankKind::AttributeOrder {
+                attribute: attr.to_string(),
+                direction: SortDirection::Asc,
+            }
         } else if array[1].as_str() == Some("desc") {
-            (
-                RankKind::AttributeOrder {
-                    attribute: attr.to_string(),
-                    direction: SortDirection::Desc,
-                },
-                false,
-            )
+            RankKind::AttributeOrder {
+                attribute: attr.to_string(),
+                direction: SortDirection::Desc,
+            }
         } else {
-            (
-                rank_expression_kind(rank_by, has_filters)?,
-                rank_expr_contains_bm25(rank_by),
-            )
+            rank_expression_kind(rank_by, has_filters)?
         }
     } else {
-        (
-            rank_expression_kind(rank_by, has_filters)?,
-            rank_expr_contains_bm25(rank_by),
-        )
+        rank_expression_kind(rank_by, has_filters)?
     };
-    Ok(RankPlan {
-        rank_by,
-        kind,
-        contains_bm25,
-    })
-}
-
-fn rank_expr_contains_bm25(expression: &Value) -> bool {
-    let Some(array) = expression.as_array() else {
-        return false;
-    };
-    if array.len() >= 3 && array.get(1).and_then(Value::as_str) == Some("BM25") {
-        return true;
-    }
-    array.iter().any(rank_expr_contains_bm25)
-}
-
-fn rank_by_is_simple_bm25(rank_by: &Value) -> bool {
-    rank_by.as_array().is_some_and(|array| {
-        array.len() >= 3 && array.get(1).and_then(Value::as_str) == Some("BM25")
-    })
+    Ok(RankPlan { rank_by, kind })
 }
 
 fn parse_attribute_order(value: &Value) -> Result<(String, SortDirection), QueryError> {
@@ -2745,13 +2643,12 @@ fn rank_expression_kind(rank_by: &Value, has_filters: bool) -> Result<RankKind, 
 
 fn prepare_rank_plan<'a>(
     rank_plan: RankPlan<'a>,
-    bm25_stats: Option<&Bm25Stats>,
     namespace: &Namespace,
 ) -> Result<PreparedRankPlan<'a>, QueryError> {
     let expression = match rank_plan.kind {
         RankKind::AttributeOrder { .. } | RankKind::MultiAttributeOrder { .. } => None,
         RankKind::SmallerIsBetter | RankKind::LargerIsBetter => {
-            Some(prepare_rank_expr(rank_plan.rank_by, bm25_stats, namespace)?)
+            Some(prepare_rank_expr(rank_plan.rank_by, namespace)?)
         }
     };
     Ok(PreparedRankPlan {
@@ -2762,7 +2659,6 @@ fn prepare_rank_plan<'a>(
 
 fn prepare_rank_expr<'a>(
     expression: &'a Value,
-    bm25_stats: Option<&Bm25Stats>,
     namespace: &Namespace,
 ) -> Result<PreparedRankExpr<'a>, QueryError> {
     if let Some(number) = expression.as_f64() {
@@ -2774,9 +2670,9 @@ fn prepare_rank_expr<'a>(
     }
     if let Some(op) = array[0].as_str() {
         match op {
-            "Sum" => return prepare_sum(array, bm25_stats, namespace),
-            "Max" => return prepare_max(array, bm25_stats, namespace),
-            "Product" => return prepare_product(array, bm25_stats, namespace),
+            "Sum" => return prepare_sum(array, namespace),
+            "Max" => return prepare_max(array, namespace),
+            "Product" => return prepare_product(array, namespace),
             "Attribute" => {
                 if array.len() != 2 {
                     return Err(QueryError::new("Attribute requires one attribute name."));
@@ -2786,9 +2682,9 @@ fn prepare_rank_expr<'a>(
                     "Attribute name",
                 )?));
             }
-            "Saturate" => return prepare_saturate(array, bm25_stats, namespace),
-            "Decay" => return prepare_decay(array, bm25_stats, namespace),
-            "Dist" => return prepare_dist(array, bm25_stats, namespace),
+            "Saturate" => return prepare_saturate(array, namespace),
+            "Decay" => return prepare_decay(array, namespace),
+            "Dist" => return prepare_dist(array, namespace),
             "And" | "Or" | "Not" => return Ok(PreparedRankExpr::Filter(expression)),
             _ => {}
         }
@@ -2809,10 +2705,12 @@ fn prepare_rank_expr<'a>(
                 attribute: attr,
                 query: sparse_map(&array[2], "query sparse vector")?,
             }),
-            "BM25" => Ok(PreparedRankExpr::Bm25 {
-                field: attr,
-                query: prepare_bm25_query(attr, &array[2], array.get(3), bm25_stats, namespace)?,
-            }),
+            "BM25" => {
+                let query = prepare_bm25_query(attr, &array[2], array.get(3), namespace)?;
+                Ok(PreparedRankExpr::Bm25 {
+                    scores: PreparedBm25Scores::new(score_indexed_bm25(namespace, attr, &query)),
+                })
+            }
             _ => Ok(PreparedRankExpr::Filter(expression)),
         };
     }
@@ -2821,7 +2719,6 @@ fn prepare_rank_expr<'a>(
 
 fn prepare_sum<'a>(
     array: &'a [Value],
-    bm25_stats: Option<&Bm25Stats>,
     namespace: &Namespace,
 ) -> Result<PreparedRankExpr<'a>, QueryError> {
     let terms = array
@@ -2829,14 +2726,13 @@ fn prepare_sum<'a>(
         .ok_or_else(|| QueryError::new("Sum requires terms."))?;
     let terms = as_array(terms, "Sum terms")?
         .iter()
-        .map(|term| prepare_rank_expr(term, bm25_stats, namespace))
+        .map(|term| prepare_rank_expr(term, namespace))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(PreparedRankExpr::Sum(terms))
 }
 
 fn prepare_max<'a>(
     array: &'a [Value],
-    bm25_stats: Option<&Bm25Stats>,
     namespace: &Namespace,
 ) -> Result<PreparedRankExpr<'a>, QueryError> {
     let terms = if array.len() == 2 {
@@ -2847,14 +2743,13 @@ fn prepare_max<'a>(
     Ok(PreparedRankExpr::Max(
         terms
             .into_iter()
-            .map(|term| prepare_rank_expr(term, bm25_stats, namespace))
+            .map(|term| prepare_rank_expr(term, namespace))
             .collect::<Result<Vec<_>, _>>()?,
     ))
 }
 
 fn prepare_product<'a>(
     array: &'a [Value],
-    bm25_stats: Option<&Bm25Stats>,
     namespace: &Namespace,
 ) -> Result<PreparedRankExpr<'a>, QueryError> {
     if array.len() != 3 {
@@ -2870,13 +2765,12 @@ fn prepare_product<'a>(
     }
     Ok(PreparedRankExpr::Product {
         weight,
-        expression: Box::new(prepare_rank_expr(&array[2], bm25_stats, namespace)?),
+        expression: Box::new(prepare_rank_expr(&array[2], namespace)?),
     })
 }
 
 fn prepare_saturate<'a>(
     array: &'a [Value],
-    bm25_stats: Option<&Bm25Stats>,
     namespace: &Namespace,
 ) -> Result<PreparedRankExpr<'a>, QueryError> {
     if array.len() < 2 {
@@ -2884,7 +2778,7 @@ fn prepare_saturate<'a>(
     }
     let options = array.get(2).and_then(Value::as_object);
     Ok(PreparedRankExpr::Saturate {
-        expression: Box::new(prepare_rank_expr(&array[1], bm25_stats, namespace)?),
+        expression: Box::new(prepare_rank_expr(&array[1], namespace)?),
         midpoint: options
             .and_then(|object| object.get("midpoint"))
             .and_then(value_as_f64)
@@ -2898,7 +2792,6 @@ fn prepare_saturate<'a>(
 
 fn prepare_decay<'a>(
     array: &'a [Value],
-    bm25_stats: Option<&Bm25Stats>,
     namespace: &Namespace,
 ) -> Result<PreparedRankExpr<'a>, QueryError> {
     if array.len() < 2 {
@@ -2906,7 +2799,7 @@ fn prepare_decay<'a>(
     }
     let options = array.get(2).and_then(Value::as_object);
     Ok(PreparedRankExpr::Decay {
-        expression: Box::new(prepare_rank_expr(&array[1], bm25_stats, namespace)?),
+        expression: Box::new(prepare_rank_expr(&array[1], namespace)?),
         midpoint: options
             .and_then(|object| object.get("midpoint"))
             .map(parse_midpoint)
@@ -2921,7 +2814,6 @@ fn prepare_decay<'a>(
 
 fn prepare_dist<'a>(
     array: &'a [Value],
-    bm25_stats: Option<&Bm25Stats>,
     namespace: &Namespace,
 ) -> Result<PreparedRankExpr<'a>, QueryError> {
     if array.len() != 3 {
@@ -2937,14 +2829,10 @@ fn prepare_dist<'a>(
                 .ok_or_else(|| QueryError::new("Dist Attribute requires a name."))?;
             PreparedDistExpr::Attribute(attr)
         } else {
-            PreparedDistExpr::Rank(Box::new(prepare_rank_expr(
-                &array[1], bm25_stats, namespace,
-            )?))
+            PreparedDistExpr::Rank(Box::new(prepare_rank_expr(&array[1], namespace)?))
         }
     } else {
-        PreparedDistExpr::Rank(Box::new(prepare_rank_expr(
-            &array[1], bm25_stats, namespace,
-        )?))
+        PreparedDistExpr::Rank(Box::new(prepare_rank_expr(&array[1], namespace)?))
     };
     Ok(PreparedRankExpr::Dist {
         expression,
@@ -2956,21 +2844,12 @@ fn prepare_bm25_query(
     field: &str,
     query: &Value,
     options: Option<&Value>,
-    stats: Option<&Bm25Stats>,
     namespace: &Namespace,
-) -> Result<Option<PreparedBm25Query>, QueryError> {
-    let config = stats
-        .and_then(|stats| {
-            stats
-                .fields
-                .get(field)
-                .map(|field_stats| &field_stats.config)
-        })
-        .cloned()
-        .unwrap_or_else(|| fts_config_for_field(namespace, field));
+) -> Result<PreparedBm25Query, QueryError> {
+    let config = fts_config_for_field(namespace, field);
     let query_tokens = query_tokens_with_config(query, "BM25 query", &config)?;
     if query_tokens.is_empty() {
-        return Ok(Some(PreparedBm25Query { terms: Vec::new() }));
+        return Ok(PreparedBm25Query { terms: Vec::new() });
     }
     let last_as_prefix = options
         .and_then(Value::as_object)
@@ -2993,21 +2872,20 @@ fn prepare_bm25_query(
             prefix: last_as_prefix && index + 1 == query_tokens.len(),
         });
     }
-    Ok(Some(PreparedBm25Query { terms }))
+    Ok(PreparedBm25Query { terms })
 }
 
 fn rank_documents<'a>(
     namespace: &'a Namespace,
     rank_plan: &PreparedRankPlan<'_>,
     filters: Option<&Value>,
-    bm25_stats: Option<&Bm25Stats>,
 ) -> Result<Vec<RankedDocument<'a>>, QueryError> {
-    if let Some((field, query)) = simple_bm25_expression(rank_plan) {
-        return rank_indexed_bm25_documents(namespace, field, query, filters);
+    if let Some(scores) = simple_bm25_scores(rank_plan) {
+        return rank_indexed_bm25_documents(namespace, scores, filters);
     }
 
     let mut ranked = Vec::new();
-    for document in &namespace.documents {
+    for (doc_index, document) in namespace.documents.iter().enumerate() {
         if !filters
             .map(|filter| eval_filter_with_schema(document, filter, Some(&namespace.schema)))
             .transpose()?
@@ -3018,12 +2896,12 @@ fn rank_documents<'a>(
         let score = match rank_plan.kind {
             RankKind::AttributeOrder { .. } | RankKind::MultiAttributeOrder { .. } => 0.0,
             RankKind::SmallerIsBetter | RankKind::LargerIsBetter => eval_prepared_rank_expr(
+                doc_index,
                 document,
                 rank_plan
                     .expression
                     .as_ref()
                     .ok_or_else(|| QueryError::new("rank expression was not prepared."))?,
-                bm25_stats,
                 namespace.distance_metric,
             )?,
         };
@@ -3043,34 +2921,23 @@ fn rank_documents<'a>(
     Ok(ranked)
 }
 
-fn simple_bm25_expression<'a>(
-    rank_plan: &'a PreparedRankPlan<'_>,
-) -> Option<(&'a str, &'a PreparedBm25Query)> {
+fn simple_bm25_scores<'a>(rank_plan: &'a PreparedRankPlan<'_>) -> Option<&'a PreparedBm25Scores> {
     if !matches!(rank_plan.kind, RankKind::LargerIsBetter) {
         return None;
     }
-    let PreparedRankExpr::Bm25 {
-        field,
-        query: Some(query),
-    } = rank_plan.expression.as_ref()?
-    else {
-        return None;
-    };
-    Some((field, query))
+    match rank_plan.expression.as_ref()? {
+        PreparedRankExpr::Bm25 { scores } => Some(scores),
+        _ => None,
+    }
 }
 
 fn rank_indexed_bm25_documents<'a>(
     namespace: &'a Namespace,
-    field: &str,
-    query: &PreparedBm25Query,
+    scores: &PreparedBm25Scores,
     filters: Option<&Value>,
 ) -> Result<Vec<RankedDocument<'a>>, QueryError> {
-    if query.terms.is_empty() {
-        return Ok(Vec::new());
-    }
-    let scored = score_indexed_bm25(namespace, field, query);
-    let mut ranked = Vec::with_capacity(scored.len());
-    for (doc_index, score) in scored {
+    let mut ranked = Vec::with_capacity(scores.ranked.len());
+    for (doc_index, score) in scores.ranked.iter().copied() {
         let Some(document) = namespace.documents.get(doc_index) else {
             continue;
         };
@@ -3284,9 +3151,9 @@ fn apply_limit<'a>(
 }
 
 fn eval_prepared_rank_expr(
+    doc_index: usize,
     document: &Document,
     expression: &PreparedRankExpr<'_>,
-    bm25_stats: Option<&Bm25Stats>,
     distance_metric: DistanceMetric,
 ) -> Result<f64, QueryError> {
     match expression {
@@ -3294,24 +3161,23 @@ fn eval_prepared_rank_expr(
         PreparedRankExpr::Sum(terms) => {
             let mut total = 0.0;
             for term in terms {
-                total += eval_prepared_rank_expr(document, term, bm25_stats, distance_metric)?;
+                total += eval_prepared_rank_expr(doc_index, document, term, distance_metric)?;
             }
             Ok(total)
         }
         PreparedRankExpr::Max(terms) => {
             let mut best = 0.0;
             for term in terms {
-                let score = eval_prepared_rank_expr(document, term, bm25_stats, distance_metric)?;
+                let score = eval_prepared_rank_expr(doc_index, document, term, distance_metric)?;
                 if score > best {
                     best = score;
                 }
             }
             Ok(best)
         }
-        PreparedRankExpr::Product { weight, expression } => {
-            Ok(*weight
-                * eval_prepared_rank_expr(document, expression, bm25_stats, distance_metric)?)
-        }
+        PreparedRankExpr::Product { weight, expression } => Ok(
+            *weight * eval_prepared_rank_expr(doc_index, document, expression, distance_metric)?
+        ),
         PreparedRankExpr::Attribute(attribute) => Ok(document_attr(document, attribute)
             .and_then(value_as_f64)
             .unwrap_or(0.0)),
@@ -3320,8 +3186,8 @@ fn eval_prepared_rank_expr(
             midpoint,
             exponent,
         } => {
-            let score = eval_prepared_rank_expr(document, expression, bm25_stats, distance_metric)?
-                .max(0.0);
+            let score =
+                eval_prepared_rank_expr(doc_index, document, expression, distance_metric)?.max(0.0);
             if score <= 0.0 || *midpoint <= 0.0 || *exponent <= 0.0 {
                 return Ok(0.0);
             }
@@ -3334,7 +3200,7 @@ fn eval_prepared_rank_expr(
             exponent,
         } => {
             let distance =
-                eval_prepared_rank_expr(document, expression, bm25_stats, distance_metric)?.abs();
+                eval_prepared_rank_expr(doc_index, document, expression, distance_metric)?.abs();
             if *midpoint <= 0.0 || *exponent <= 0.0 {
                 return Ok(0.0);
             }
@@ -3347,9 +3213,9 @@ fn eval_prepared_rank_expr(
                     .cloned()
                     .unwrap_or(Value::Null),
                 PreparedDistExpr::Rank(expression) => number_value(eval_prepared_rank_expr(
+                    doc_index,
                     document,
                     expression,
-                    bm25_stats,
                     distance_metric,
                 )?),
             };
@@ -3361,12 +3227,7 @@ fn eval_prepared_rank_expr(
         PreparedRankExpr::SparseDotProduct { attribute, query } => {
             sparse_dot_product_with_query(document, attribute, query)
         }
-        PreparedRankExpr::Bm25 { field, query } => bm25_score_with_query(
-            document,
-            field,
-            query.as_ref(),
-            bm25_stats.ok_or_else(|| QueryError::new("BM25 stats were not prepared."))?,
-        ),
+        PreparedRankExpr::Bm25 { scores } => Ok(scores.score(doc_index)),
         PreparedRankExpr::Filter(filter) => Ok(if eval_filter(document, filter)? {
             1.0
         } else {
@@ -3541,67 +3402,6 @@ fn sparse_dot_product_with_query(
         if let Some(query_value) = query_vector.get(key) {
             score += doc_value * query_value;
         }
-    }
-    Ok(score)
-}
-
-fn bm25_score_with_query(
-    document: &Document,
-    field: &str,
-    query: Option<&PreparedBm25Query>,
-    stats: &Bm25Stats,
-) -> Result<f64, QueryError> {
-    let Some(query) = query else {
-        return Ok(0.0);
-    };
-    if query.terms.is_empty() {
-        return Ok(0.0);
-    }
-    let field_stats = match stats.fields.get(field) {
-        Some(stats) if stats.doc_count > 0 && stats.avg_len > 0.0 => stats,
-        _ => return Ok(0.0),
-    };
-    let document_tokens = string_attr_tokens_with_config(document, field, &field_stats.config);
-    if document_tokens.is_empty() {
-        return Ok(0.0);
-    }
-    let mut term_counts: HashMap<String, usize> = HashMap::new();
-    for token in &document_tokens {
-        let count = term_counts.entry(token.clone()).or_insert(0);
-        *count += 1;
-    }
-    let mut score = 0.0;
-    for term in &query.terms {
-        if term.prefix {
-            if document_tokens
-                .iter()
-                .any(|doc_token| doc_token.starts_with(&term.token))
-            {
-                score += 1.0;
-            }
-            continue;
-        }
-        let Some(tf) = term_counts.get(&term.token).copied() else {
-            continue;
-        };
-        let doc_freq = field_stats.doc_freqs.get(&term.token).copied().unwrap_or(0);
-        if doc_freq == 0 {
-            continue;
-        }
-        let idf = ((field_stats.doc_count as f64 - doc_freq as f64 + 0.5)
-            / (doc_freq as f64 + 0.5)
-            + 1.0)
-            .ln();
-        let tf = tf as f64;
-        let doc_len = document_tokens.len() as f64;
-        let k1 = field_stats.config.k1();
-        let b = field_stats.config.b();
-        let k3 = field_stats.config.k3();
-        let qtf = term.query_frequency as f64;
-        let query_weight = (qtf * (k3 + 1.0)) / (qtf + k3);
-        score += idf * (tf * (k1 + 1.0))
-            / (tf + k1 * (1.0 - b + b * doc_len / field_stats.avg_len))
-            * query_weight;
     }
     Ok(score)
 }
