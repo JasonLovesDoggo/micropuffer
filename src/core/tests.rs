@@ -6,7 +6,10 @@ use crate::{
         patch_by_filter_with_limit, query_namespace, query_store, tokenize, write_store,
     },
 };
-use base64::{Engine, engine::general_purpose::STANDARD};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
+};
 use serde_json::{Map, Number, Value, json};
 
 fn namespace() -> Namespace {
@@ -2585,6 +2588,27 @@ fn micropuffer_lists_copies_and_deletes_namespaces() {
     let listed = clone.list_namespaces(Some("demo"), None, 10).unwrap();
     let namespaces = listed.get("namespaces").and_then(Value::as_array).unwrap();
     assert_eq!(namespaces.len(), 2);
+    let first_page = clone.list_namespaces(Some("demo"), None, 1).unwrap();
+    assert_eq!(first_page["namespaces"], json!([{"id": "demo-copy"}]));
+    let cursor = first_page["next_cursor"].as_str().unwrap();
+    assert_eq!(
+        String::from_utf8(STANDARD_NO_PAD.decode(cursor).unwrap()).unwrap(),
+        r#"{"continuation_token":null,"start_after":"demo-copy-table/"}"#
+    );
+    let second_page = clone
+        .list_namespaces(Some("demo"), Some(cursor), 1)
+        .unwrap();
+    assert_eq!(second_page["namespaces"], json!([{"id": "demo"}]));
+    let second_cursor = second_page["next_cursor"].as_str().unwrap();
+    assert_eq!(
+        String::from_utf8(STANDARD_NO_PAD.decode(second_cursor).unwrap()).unwrap(),
+        r#"{"continuation_token":null,"start_after":"demo-table/"}"#
+    );
+    let empty_page = clone
+        .list_namespaces(Some("demo"), Some(second_cursor), 1)
+        .unwrap();
+    assert_eq!(empty_page["namespaces"], json!([]));
+    assert!(empty_page.get("next_cursor").is_none());
     let copied = clone
         .query("demo-copy", &json!({"aggregate_by": {"count": ["Count"]}}))
         .unwrap();

@@ -455,6 +455,26 @@ async function assertListNamespaceParity(): Promise<void> {
     "micropuffer list response"
   );
   expect(namespaceIds(mini)).toStrictEqual(namespaceIds(live));
+
+  const liveFirstPage = await liveJson(
+    "GET",
+    `/v1/namespaces?prefix=${encodeURIComponent(namespaceName)}&page_size=1`
+  );
+  const miniFirstPage = parseJsonObject(
+    micropuffer.listNamespaces(JSON.stringify({ prefix: namespaceName, page_size: 1 })),
+    "micropuffer list first page response"
+  );
+  expectJsonParity(liveFirstPage, miniFirstPage);
+  const cursor = requireString(liveFirstPage.next_cursor, "live namespace list cursor");
+  const liveSecondPage = await liveJson(
+    "GET",
+    `/v1/namespaces?prefix=${encodeURIComponent(namespaceName)}&page_size=1&cursor=${encodeURIComponent(cursor)}`
+  );
+  const miniSecondPage = parseJsonObject(
+    micropuffer.listNamespaces(JSON.stringify({ prefix: namespaceName, page_size: 1, cursor })),
+    "micropuffer list second page response"
+  );
+  expectJsonParity(liveSecondPage, miniSecondPage);
 }
 
 async function assertMetadataParity(): Promise<void> {
@@ -1548,6 +1568,13 @@ function schemaTypes(metadata: JsonObject): JsonObject {
 function requireObject(value: JsonValue, label: string): JsonObject {
   if (!isJsonObject(value)) {
     throw new Error(`${label} was not a JSON object.`);
+  }
+  return value;
+}
+
+function requireString(value: JsonValue, label: string): string {
+  if (typeof value !== "string") {
+    throw new Error(`${label} was not a string.`);
   }
   return value;
 }
