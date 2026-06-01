@@ -940,7 +940,53 @@ pub fn export_namespace(namespace: &Namespace, request: &Value) -> Result<Value,
     if let Some(vector_encoding) = object.get("vector_encoding") {
         query.insert("vector_encoding".to_string(), vector_encoding.clone());
     }
-    query_namespace(namespace, &Value::Object(query))
+    let query_result = query_namespace(namespace, &Value::Object(query))?;
+    columnar_export_from_query_result(&query_result)
+}
+
+fn columnar_export_from_query_result(query_result: &Value) -> Result<Value, QueryError> {
+    let rows = query_result
+        .get("rows")
+        .and_then(Value::as_array)
+        .ok_or_else(|| QueryError::new("export query did not return rows."))?;
+    let mut ids = Vec::with_capacity(rows.len());
+    let mut vectors = Vec::with_capacity(rows.len());
+    let mut attribute_names = BTreeSet::new();
+    let mut row_objects = Vec::with_capacity(rows.len());
+
+    for row in rows {
+        let row_object = as_object(row, "export row")?;
+        ids.push(
+            row_object
+                .get("id")
+                .cloned()
+                .ok_or_else(|| QueryError::new("export row is missing id."))?,
+        );
+        vectors.push(row_object.get("vector").cloned().unwrap_or(Value::Null));
+        for key in row_object.keys() {
+            if key != "id" && key != "vector" && key != "$dist" {
+                attribute_names.insert(key.clone());
+            }
+        }
+        row_objects.push(row_object);
+    }
+
+    let mut attributes = Map::new();
+    for attribute in attribute_names {
+        let values = row_objects
+            .iter()
+            .map(|row| row.get(&attribute).cloned().unwrap_or(Value::Null))
+            .collect::<Vec<_>>();
+        attributes.insert(attribute, Value::Array(values));
+    }
+
+    Ok(json!({
+        "ids": ids,
+        "vectors": vectors,
+        "attributes": attributes,
+        "next_cursor": null,
+        "message": null
+    }))
 }
 
 pub fn recall_namespace(namespace: &Namespace, request: &Value) -> Result<Value, QueryError> {

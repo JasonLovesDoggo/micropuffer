@@ -253,6 +253,7 @@ test("micropuffer wasm matches live turbopuffer for core query and workspace ope
   expectJsonParity(await liveQuery(namespaceName, afterDeleteLookup), miniQuery(namespaceName, afterDeleteLookup));
 
   await assertCopyParity(afterDeleteLookup);
+  await assertDeprecatedExportParity();
   await assertListNamespaceParity();
   await assertMetadataParity();
   await assertSchemaParity();
@@ -368,6 +369,11 @@ async function assertCopyParity(lookup: JsonObject): Promise<void> {
   const miniCopy = miniWrite(copyNamespaceName, { copy_from_namespace: namespaceName });
   expect(miniCopy.rows_affected).toBe(liveCopy.rows_affected);
   expectJsonParity(await liveQuery(copyNamespaceName, lookup), miniQuery(copyNamespaceName, lookup));
+}
+
+async function assertDeprecatedExportParity(): Promise<void> {
+  const live = await liveJson("GET", `/v1/namespaces/${encodeURIComponent(namespaceName)}`);
+  expectJsonParity(live, miniExportNamespace(namespaceName));
 }
 
 async function assertListNamespaceParity(): Promise<void> {
@@ -618,6 +624,13 @@ function miniQuery(namespace: string, request: JsonObject): JsonObject {
   return parseJsonObject(
     micropuffer.query(namespace, JSON.stringify(request)),
     "micropuffer query response"
+  );
+}
+
+function miniExportNamespace(namespace: string): JsonObject {
+  return parseJsonObject(
+    micropuffer.exportNamespace(namespace, JSON.stringify({})),
+    "micropuffer namespace export response"
   );
 }
 
