@@ -46,7 +46,7 @@ test("micropuffer wasm fuzzes live turbopuffer query parity", async () => {
         `fuzz case ${fuzzCase.name}: ${JSON.stringify(fuzzCase.request)}`
       );
     }),
-    { numRuns: 80, seed }
+    { numRuns: 160, seed }
   );
 
   for (const fuzzCase of fixedCases()) {
@@ -59,6 +59,10 @@ function buildSeedWrite(): JsonObject {
     distance_metric: "cosine_distance",
     schema: {
       text: { type: "string", full_text_search: true },
+      tokens: {
+        type: "[]string",
+        full_text_search: { tokenizer: "pre_tokenized_array" }
+      },
       name: { type: "string", regex: true },
       published_at: "datetime",
       tags: "[]string",
@@ -69,12 +73,12 @@ function buildSeedWrite(): JsonObject {
       }
     },
     upsert_rows: [
-      row(1, [1, 0], { "0": 1, "2": 0.5 }, "mammal", 1, "alpha", "walrus narwhal arctic mammal", 10, ["arctic", "mammal"], [1, 5], "2026-05-30T00:00:00Z"),
-      row(2, [0, 1], { "1": 1 }, "fish", 0, "bravo", "pufferfish clownfish swordfish", 7, ["fish"], [3, 7], "2026-05-29T00:00:00Z"),
-      row(3, [0.8, 0.2], { "0": 0.8, "2": 0.2 }, "mammal", 1, "charlie", "quick walrus sea mammal", 5, ["mammal", "sea"], [2, 9], "2026-05-31T00:00:00Z"),
-      row(4, [0.25, 0.75], { "1": 0.9, "3": 0.4 }, "bird", 1, "delta", "swift falcon sky hunter", 12, ["bird", "sky"], [4, 8], "2026-05-28T00:00:00Z"),
-      row(5, [0.6, 0.4], { "0": 0.3, "2": 0.9 }, "mammal", 0, "echo", "brown fox quick den", 3, ["mammal", "forest"], [0, 3], "2026-05-27T00:00:00Z"),
-      row(6, [0.1, 0.9], { "1": 0.7, "3": 0.1 }, "fish", 1, "foxtrot", "reef fish coral clownfish", 9, ["fish", "reef"], [6, 9], "2026-05-26T00:00:00Z")
+      row(1, [1, 0], { "0": 1, "2": 0.5 }, "mammal", 1, "alpha", "walrus narwhal arctic mammal", ["walrus", "narwhal", "mammal"], 10, ["arctic", "mammal"], [1, 5], "2026-05-30T00:00:00Z"),
+      row(2, [0, 1], { "1": 1 }, "fish", 0, "bravo", "pufferfish clownfish swordfish", ["pufferfish", "clownfish", "swordfish"], 7, ["fish"], [3, 7], "2026-05-29T00:00:00Z"),
+      row(3, [0.8, 0.2], { "0": 0.8, "2": 0.2 }, "mammal", 1, "charlie", "quick walrus sea mammal", ["quick", "walrus", "mammal"], 5, ["mammal", "sea"], [2, 9], "2026-05-31T00:00:00Z"),
+      row(4, [0.25, 0.75], { "1": 0.9, "3": 0.4 }, "bird", 1, "delta", "swift falcon sky hunter", ["swift", "falcon", "sky"], 12, ["bird", "sky"], [4, 8], "2026-05-28T00:00:00Z"),
+      row(5, [0.6, 0.4], { "0": 0.3, "2": 0.9 }, "mammal", 0, "echo", "brown fox quick den", ["brown", "fox", "quick"], 3, ["mammal", "forest"], [0, 3], "2026-05-27T00:00:00Z"),
+      row(6, [0.1, 0.9], { "1": 0.7, "3": 0.1 }, "fish", 1, "foxtrot", "reef fish coral clownfish", ["reef", "fish", "coral"], 9, ["fish", "reef"], [6, 9], "2026-05-26T00:00:00Z")
     ]
   };
 }
@@ -87,6 +91,7 @@ function row(
   isPublic: number,
   name: string,
   text: string,
+  tokens: JsonArray,
   score: number,
   tags: JsonArray,
   scores: JsonArray,
@@ -100,6 +105,7 @@ function row(
     public: isPublic,
     name,
     text,
+    tokens,
     score,
     tags,
     scores,
@@ -118,6 +124,7 @@ const RANKERS: JsonValue[] = [
   ["vector", "kNN", [0.9, 0.1]],
   ["text", "BM25", "quick walrus"],
   ["text", "BM25", "clown", { last_as_prefix: true }],
+  ["tokens", "BM25", ["walrus"]],
   ["sparse_vector", "SparseKNN", { "0": 1.0, "2": 0.1 }],
   ["Sum", [["text", "BM25", "quick"], ["Product", 2, ["category", "Eq", "mammal"]]]],
   ["Max", [["text", "BM25", "fish"], ["Product", 1.5, ["public", "Eq", 1]]]]
@@ -141,21 +148,32 @@ const FILTERS: JsonValue[] = [
   ["scores", "AnyGt", 8],
   ["scores", "AnyGte", 9],
   ["name", "Glob", "c*"],
+  ["name", "NotGlob", "z*"],
   ["name", "IGlob", "E*"],
+  ["name", "NotIGlob", "z*"],
   ["name", "Regex", "^(alpha|delta)$"],
   ["text", "ContainsAllTokens", "quick mammal"],
   ["text", "ContainsAnyToken", "coral narwhal"],
   ["text", "ContainsTokenSequence", "sea mammal"],
+  ["tokens", "ContainsAllTokens", ["walrus", "mammal"]],
+  ["tokens", "ContainsAnyToken", ["reef", "narwhal"]],
+  ["tokens", "ContainsTokenSequence", ["walrus", "narwhal"]],
   ["And", [["category", "Eq", "mammal"], ["public", "Eq", 1]]],
   ["Or", [["category", "Eq", "bird"], ["tags", "Contains", "reef"]]],
   ["Not", ["category", "Eq", "fish"]]
 ];
 
-const INCLUDES: JsonValue[] = [
-  ["category"],
-  ["category", "score"],
-  ["name", "tags"],
-  true
+const PROJECTIONS: JsonObject[] = [
+  {},
+  { include_attributes: [] },
+  { include_attributes: ["category"] },
+  { include_attributes: ["category", "score"] },
+  { include_attributes: ["vector", "category"] },
+  { include_attributes: ["vector"], vector_encoding: "base64" },
+  { include_attributes: ["name", "tags"] },
+  { include_attributes: false },
+  { include_attributes: true },
+  { exclude_attributes: ["vector", "sparse_vector", "text"] }
 ];
 
 function queryCaseArbitrary(): fc.Arbitrary<FuzzCase> {
@@ -165,14 +183,21 @@ function queryCaseArbitrary(): fc.Arbitrary<FuzzCase> {
       rankBy: fc.constantFrom(...RANKERS),
       filter: fc.option(fc.constantFrom(...FILTERS), { nil: undefined }),
       limit: fc.integer({ min: 1, max: 5 }),
-      includeAttributes: fc.constantFrom(...INCLUDES)
+      limitField: fc.constantFrom("limit", "top_k"),
+      projection: fc.constantFrom(...PROJECTIONS)
     })
-    .map(({ caseId, rankBy, filter, limit, includeAttributes }) => {
+    .map(({ caseId, rankBy, filter, limit, limitField, projection }) => {
       const request: JsonObject = {
-        rank_by: rankBy,
-        limit,
-        include_attributes: includeAttributes
+        rank_by: rankBy
       };
+      if (limitField === "top_k") {
+        request.top_k = limit;
+      } else {
+        request.limit = limit;
+      }
+      for (const [key, value] of Object.entries(projection)) {
+        request[key] = value;
+      }
       if (filter !== undefined) {
         request.filters = filter;
       }
@@ -185,6 +210,47 @@ function queryCaseArbitrary(): fc.Arbitrary<FuzzCase> {
 
 function fixedCases(): FuzzCase[] {
   return [
+    {
+      name: "limit-per-category",
+      request: {
+        rank_by: ["category", "asc"],
+        limit: { total: 5, per: { attributes: ["category"], limit: 1 } },
+        include_attributes: ["category", "score"]
+      }
+    },
+    {
+      name: "base64-vector-projection",
+      request: {
+        rank_by: ["vector", "ANN", [1, 0]],
+        limit: 3,
+        include_attributes: ["vector"],
+        vector_encoding: "base64"
+      }
+    },
+    {
+      name: "pretokenized-token-sequence",
+      request: {
+        rank_by: ["id", "asc"],
+        filters: ["tokens", "ContainsTokenSequence", ["walrus", "narwhal"]],
+        limit: 10,
+        include_attributes: ["tokens"]
+      }
+    },
+    {
+      name: "aggregate-sum-public",
+      request: {
+        aggregate_by: { score_sum: ["Sum", "score"] },
+        filters: ["public", "Eq", 1]
+      }
+    },
+    {
+      name: "aggregate-for-each-tag",
+      request: {
+        aggregate_by: { count: ["Count"] },
+        group_by: [{ tag: ["ForEachUnique", "tags"] }],
+        top_k: 10
+      }
+    },
     {
       name: "aggregate-count-public",
       request: {
@@ -211,9 +277,12 @@ function fixedCases(): FuzzCase[] {
       name: "multi-query",
       request: {
         queries: [
-          { rank_by: ["vector", "ANN", [1, 0]], limit: 2 },
-          { rank_by: ["text", "BM25", "fish"], limit: 2 }
-        ]
+          { rank_by: ["vector", "ANN", [1, 0]], limit: 2, include_attributes: ["vector"] },
+          { rank_by: ["tokens", "BM25", ["fish"]], limit: 2 }
+        ],
+        rank_by: ["id", "desc"],
+        filters: ["public", "Eq", 0],
+        vector_encoding: "base64"
       }
     }
   ];

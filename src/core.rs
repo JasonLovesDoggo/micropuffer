@@ -1236,35 +1236,377 @@ fn document_vector_value(document: &Document) -> Option<Value> {
 
 pub fn explain_query(namespace: &Namespace, request: &Value) -> Result<Value, QueryError> {
     let object = as_object(request, "query request")?;
-    if object.contains_key("aggregate_by") && !object.contains_key("queries") {
-        if let Some(filters) = object.get("filters") {
-            for document in &namespace.documents {
-                eval_filter_with_schema(document, filters, Some(&namespace.schema))?;
-            }
+    let mut plan = Vec::new();
+    validate_consistency_shape(object)?;
+    let vector_encoding = parse_vector_encoding(object.get("vector_encoding"))?;
+    plan.push("explain_source=micropuffer-local".to_string());
+    plan.push("parity=not-live-turbopuffer-plan".to_string());
+    plan.push(format!("namespace={}", namespace.name));
+    plan.push(format!("rows={}", namespace.documents.len()));
+    plan.push(format!(
+        "schema_attributes={}",
+        schema_with_id(namespace).len()
+    ));
+    plan.push(
+        "async_realism=disabled; writes are immediately visible and indexes are in-memory"
+            .to_string(),
+    );
+    plan.push(format!(
+        "root_vector_encoding={}",
+        vector_encoding_name(vector_encoding)
+    ));
+    if let Some(queries) = object.get("queries") {
+        let subqueries = parse_multi_query_subqueries(queries)?;
+        if subqueries.is_empty() {
+            return Err(QueryError::new("💔 must send at least one sub-query"));
+        }
+        if subqueries.len() > 16 {
+            return Err(QueryError::new(
+                "💔 multi-query exceeds per-namespace concurrency budget: requires 17 permits, max is 16 (see https://turbopuffer.com/docs/limits)",
+            ));
+        }
+        plan.push("operation=multi_query".to_string());
+        plan.push(format!("subqueries={}", subqueries.len()));
+        for (index, subquery) in subqueries.iter().enumerate() {
+            let subquery = as_object(subquery, "query request")?;
+            explain_single_query(
+                namespace,
+                subquery,
+                vector_encoding,
+                &format!("subquery[{index}]."),
+                &mut plan,
+            )?;
         }
     } else {
-        let rank_by = object
-            .get("rank_by")
-            .ok_or_else(|| QueryError::new("rank_by is required unless aggregate_by is set."))?;
-        parse_rank_plan(rank_by, object.get("filters").is_some())?;
-        parse_limit(object)?;
-    }
-    let mut plan = Vec::new();
-    plan.push(format!("namespace={}", namespace.name));
-    if object.contains_key("queries") {
-        plan.push("operation=multi_query".to_string());
-    } else if object.contains_key("aggregate_by") {
-        plan.push("operation=aggregate".to_string());
-    } else {
-        plan.push("operation=query".to_string());
-    }
-    if object.contains_key("filters") {
-        plan.push("filters=enabled".to_string());
-    }
-    if let Some(limit) = object.get("limit").or_else(|| object.get("top_k")) {
-        plan.push(format!("limit={limit}"));
+        explain_single_query(namespace, object, vector_encoding, "", &mut plan)?;
     }
     Ok(json!({ "plan_text": plan.join("\n") }))
+}
+
+fn explain_single_query(
+    namespace: &Namespace,
+    object: &Map<String, Value>,
+    vector_encoding: VectorEncoding,
+    prefix: &str,
+    plan: &mut Vec<String>,
+) -> Result<(), QueryError> {
+    validate_consistency_shape(object)?;
+    if object.contains_key("rank_by") && object.contains_key("aggregate_by") {
+        return Err(QueryError::new(
+            "rank_by and aggregate_by cannot be specified together.",
+        ));
+    }
+    if object.contains_key("include_attributes") && object.contains_key("exclude_attributes") {
+        return Err(QueryError::new(
+            "💔 cannot specify both include_attributes and exclude_attributes",
+        ));
+    }
+    validate_projection_shape(object)?;
+    validate_included_attributes(namespace, object)?;
+    plan.push(format!(
+        "{prefix}consistency={}",
+        explain_consistency(object.get("consistency"))
+    ));
+    if let Some(aggregate_by) = object.get("aggregate_by") {
+        if object.contains_key("include_attributes") {
+            return Err(QueryError::new(
+                "aggregate_by and include_attributes cannot be specified together.",
+            ));
+        }
+        let _ = query_aggregations(namespace, object, aggregate_by)?;
+        plan.push(format!("{prefix}operation=aggregate"));
+        plan.push(format!(
+            "{prefix}aggregate_by={}",
+            explain_json(aggregate_by)
+        ));
+        if let Some(group_by) = object.get("group_by") {
+            plan.push(format!("{prefix}group_by={}", explain_json(group_by)));
+        }
+        if let Some(filters) = object.get("filters") {
+            plan.push(format!(
+                "{prefix}filters={}",
+                explain_filter_strategy(filters)
+            ));
+        } else {
+            plan.push(format!("{prefix}filters=none"));
+        }
+        plan.push(format!(
+            "{prefix}candidate_source={}",
+            explain_aggregate_candidate_source(object)
+        ));
+        if let Some(top_k) = object.get("top_k") {
+            plan.push(format!("{prefix}top_k={top_k}"));
+        }
+        return Ok(());
+    }
+    let rank_by = object
+        .get("rank_by")
+        .ok_or_else(|| QueryError::new("rank_by is required unless aggregate_by is set."))?;
+    let limit = parse_limit(object)?;
+    let filters = object.get("filters");
+    if let Some(filters) = filters {
+        validate_filter_against_namespace(namespace, filters)?;
+    }
+    let rank_plan = parse_rank_plan(rank_by, filters.is_some())?;
+    if limit.per.is_some()
+        && !matches!(
+            rank_plan.kind,
+            RankKind::AttributeOrder { .. } | RankKind::MultiAttributeOrder { .. }
+        )
+    {
+        return Err(QueryError::new(
+            "💔 `limit.per` is only supported when ranking by an attribute",
+        ));
+    }
+    let _ = prepare_rank_plan(rank_plan.clone(), namespace)?;
+    plan.push(format!("{prefix}operation=query"));
+    plan.push(format!(
+        "{prefix}ranker={}",
+        explain_ranker(namespace, rank_by)
+    ));
+    plan.push(format!(
+        "{prefix}rank_order={}",
+        explain_rank_kind(&rank_plan.kind)
+    ));
+    plan.push(format!(
+        "{prefix}candidate_source={}",
+        explain_candidate_source(&rank_plan.kind, rank_by, filters)
+    ));
+    if let Some(filters) = filters {
+        plan.push(format!(
+            "{prefix}filters={}",
+            explain_filter_strategy(filters)
+        ));
+    } else {
+        plan.push(format!("{prefix}filters=none"));
+    }
+    plan.push(format!("{prefix}limit_total={}", limit.total));
+    if let Some(per) = &limit.per {
+        plan.push(format!(
+            "{prefix}limit_per=attributes:{} max_per_value:{}",
+            per.attributes.join(","),
+            per.limit
+        ));
+    }
+    plan.push(format!(
+        "{prefix}projection={}",
+        explain_projection(object, vector_encoding)
+    ));
+    Ok(())
+}
+
+fn validate_filter_against_namespace(
+    namespace: &Namespace,
+    filters: &Value,
+) -> Result<(), QueryError> {
+    for document in &namespace.documents {
+        eval_filter_with_schema(document, filters, Some(&namespace.schema))?;
+    }
+    Ok(())
+}
+
+fn explain_consistency(consistency: Option<&Value>) -> String {
+    consistency
+        .and_then(Value::as_object)
+        .and_then(|object| object.get("level"))
+        .and_then(Value::as_str)
+        .unwrap_or("strong(default)")
+        .to_string()
+}
+
+fn explain_aggregate_candidate_source(object: &Map<String, Value>) -> &'static str {
+    if object.contains_key("group_by") {
+        "grouped_aggregation_scan_or_group_count_index"
+    } else if object.contains_key("filters") {
+        "filter_scan_then_aggregate"
+    } else {
+        "namespace_row_count"
+    }
+}
+
+fn explain_candidate_source(
+    rank_kind: &RankKind,
+    rank_by: &Value,
+    filters: Option<&Value>,
+) -> String {
+    let base = match rank_kind {
+        RankKind::AttributeOrder { .. } | RankKind::MultiAttributeOrder { .. } => "order_index",
+        RankKind::SmallerIsBetter => match explain_rank_operator(rank_by).as_deref() {
+            Some("ANN") | Some("kNN") => "exact_dense_scan",
+            _ => "exact_rank_expression_scan",
+        },
+        RankKind::LargerIsBetter => match explain_rank_operator(rank_by).as_deref() {
+            Some("BM25") => "bm25_postings_index",
+            Some("SparseKNN") => "sparse_vector_index",
+            _ => "exact_rank_expression_scan",
+        },
+    };
+    match filters {
+        Some(filter) => format!("{base}+{}", explain_filter_candidate_source(filter)),
+        None => base.to_string(),
+    }
+}
+
+fn explain_filter_candidate_source(filter: &Value) -> &'static str {
+    let Some(array) = filter.as_array() else {
+        return "filter_validation";
+    };
+    if array.is_empty() {
+        return "filter_validation";
+    }
+    match array.first().and_then(Value::as_str) {
+        Some("And" | "Or") => {
+            let Some(children) = array.get(1).and_then(Value::as_array) else {
+                return "filter_validation";
+            };
+            if children
+                .iter()
+                .all(|child| explain_filter_candidate_source(child) == "indexed_filter_candidates")
+            {
+                "indexed_filter_candidates"
+            } else {
+                "filter_recheck"
+            }
+        }
+        Some("Not") => "filter_recheck",
+        _ => match array.get(1).and_then(Value::as_str) {
+            Some("Eq" | "In") => "indexed_filter_candidates",
+            _ => "filter_recheck",
+        },
+    }
+}
+
+fn explain_filter_strategy(filter: &Value) -> String {
+    format!(
+        "present source:{} expression:{}",
+        explain_filter_candidate_source(filter),
+        explain_json(filter)
+    )
+}
+
+fn explain_projection(object: &Map<String, Value>, vector_encoding: VectorEncoding) -> String {
+    if let Some(include) = object.get("include_attributes") {
+        return format!(
+            "include={} vector_encoding={}",
+            explain_json(include),
+            vector_encoding_name(vector_encoding)
+        );
+    }
+    if let Some(exclude) = object.get("exclude_attributes") {
+        return format!(
+            "exclude={} vector_encoding={}",
+            explain_json(exclude),
+            vector_encoding_name(vector_encoding)
+        );
+    }
+    format!(
+        "default vector_encoding={}",
+        vector_encoding_name(vector_encoding)
+    )
+}
+
+fn explain_ranker(namespace: &Namespace, rank_by: &Value) -> String {
+    let Some(array) = rank_by.as_array() else {
+        return "invalid".to_string();
+    };
+    if array.iter().all(Value::is_array) {
+        return format!("multi_attribute_order {}", explain_json(rank_by));
+    }
+    if array.len() == 2 && matches!(array.get(1).and_then(Value::as_str), Some("asc" | "desc")) {
+        return format!("attribute_order {}", explain_json(rank_by));
+    }
+    if let Some(operator) = explain_rank_operator(rank_by) {
+        match operator.as_str() {
+            "ANN" | "kNN" => {
+                return format!(
+                    "{} attr={} engine=exact_linear_scan distance_metric={}",
+                    operator,
+                    array.first().and_then(Value::as_str).unwrap_or("<invalid>"),
+                    namespace.distance_metric.as_write_error_str()
+                );
+            }
+            "SparseKNN" => {
+                return format!(
+                    "SparseKNN attr={} engine=sparse_postings",
+                    array.first().and_then(Value::as_str).unwrap_or("<invalid>")
+                );
+            }
+            "BM25" => {
+                let last_as_prefix = array
+                    .get(3)
+                    .and_then(Value::as_object)
+                    .and_then(|object| object.get("last_as_prefix"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                return format!(
+                    "BM25 attr={} query={} last_as_prefix={last_as_prefix}",
+                    array.first().and_then(Value::as_str).unwrap_or("<invalid>"),
+                    array.get(2).map(explain_json).unwrap_or_default()
+                );
+            }
+            _ => return format!("rank_expression operator={operator}"),
+        }
+    }
+    if let Some(operator) = array.first().and_then(Value::as_str) {
+        return format!("rank_expression operator={operator}");
+    }
+    "rank_expression".to_string()
+}
+
+fn explain_rank_operator(rank_by: &Value) -> Option<String> {
+    let array = rank_by.as_array()?;
+    if array.len() >= 2
+        && let Some(operator) = array.get(1).and_then(Value::as_str)
+        && matches!(operator, "ANN" | "kNN" | "SparseKNN" | "BM25")
+    {
+        return Some(operator.to_string());
+    }
+    array
+        .first()
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+}
+
+fn explain_rank_kind(kind: &RankKind) -> String {
+    match kind {
+        RankKind::SmallerIsBetter => "smaller_is_better".to_string(),
+        RankKind::LargerIsBetter => "larger_is_better".to_string(),
+        RankKind::AttributeOrder {
+            attribute,
+            direction,
+        } => format!(
+            "attribute_order attr={attribute} direction={}",
+            sort_direction_name(*direction)
+        ),
+        RankKind::MultiAttributeOrder { attributes } => {
+            let fields = attributes
+                .iter()
+                .map(|(attribute, direction)| {
+                    format!("{attribute}:{}", sort_direction_name(*direction))
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("multi_attribute_order fields={fields}")
+        }
+    }
+}
+
+fn sort_direction_name(direction: SortDirection) -> &'static str {
+    match direction {
+        SortDirection::Asc => "asc",
+        SortDirection::Desc => "desc",
+    }
+}
+
+fn vector_encoding_name(encoding: VectorEncoding) -> &'static str {
+    match encoding {
+        VectorEncoding::Float => "float",
+        VectorEncoding::Base64 => "base64",
+    }
+}
+
+fn explain_json(value: &Value) -> String {
+    value.to_string()
 }
 
 pub fn write_store(
